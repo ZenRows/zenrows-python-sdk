@@ -13,10 +13,12 @@ Start using the API by [creating your API Key](https://www.zenrows.com/register?
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
+It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 429, 500, 502, 503, and 504). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
+
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY")
+client = ZenRowsClient("YOUR-API-KEY", retries=1)
 url = "https://www.zenrows.com/"
 
 response = client.get(url, params={

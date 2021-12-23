@@ -1,4 +1,5 @@
 from unittest import mock, TestCase
+from requests import Session
 
 from zenrows import ZenRowsClient
 from zenrows.__version__ import __version__
@@ -13,7 +14,7 @@ class TestZenRowsClient(TestCase):
     def setUpClass(self):
         self.zenrows_client = ZenRowsClient(apikey)
 
-    @mock.patch("requests.get")
+    @mock.patch.object(Session, "get")
     def test_get_url(self, mock_get):
         self.zenrows_client.get(url)
 
@@ -28,7 +29,7 @@ class TestZenRowsClient(TestCase):
             }
         )
 
-    @mock.patch("requests.get")
+    @mock.patch.object(Session, "get")
     def test_get_with_params(self, mock_get):
         self.zenrows_client.get(
             url, params={
@@ -49,7 +50,7 @@ class TestZenRowsClient(TestCase):
             }
         )
 
-    @mock.patch("requests.get")
+    @mock.patch.object(Session, "get")
     def test_get_with_headers(self, mock_get):
         self.zenrows_client.get(
             url, headers={"Referrer": "https://www.google.com"})
@@ -67,7 +68,7 @@ class TestZenRowsClient(TestCase):
             }
         )
 
-    @mock.patch("requests.get")
+    @mock.patch.object(Session, "get")
     def test_get_overwrite_ua(self, mock_get):
         self.zenrows_client.get(
             url, headers={"User-Agent": "MyCustomUserAgent", })
