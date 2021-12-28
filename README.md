@@ -67,6 +67,33 @@ You can also pass optional `params` and `headers`; the list above is a reference
 
 Sending headers to the target URL will overwrite our defaults. Be careful when doing it and contact us if there is any problem.
 
+### Concurrency
+
+To limit the concurrency, it uses [asyncio](https://docs.python.org/3/library/asyncio.html), which will simultaneously send a maximum of requests. The concurrency is determined by the plan you are in, so take a look at the [pricing](https://www.zenrows.com/pricing) and set it accordingly. Take into account that each client instance will have its own limit, meaning that two different scripts will not share it, and 429 (Too Many Requests) errors might arise.
+
+The main difference with the sequential snippet above is `client.get_async` instead of `client.get`. The rest will work exactly the same, and we will support the `get` function. But the async is necessary to parallelize calls and allow async/await syntax. Remember to run the scripts with `asyncio.run` or it will fail with a `coroutine 'main' was never awaited` error.
+
+We use `asyncio.gather` in the example below. It will wait for all the calls to finish, and the results are stored in a `responses` array. The whole list of URLs will run, even if some fail. Then each response will have the status, request, response content, and other values as usual.
+
+```python
+from zenrows import ZenRowsClient
+import asyncio
+
+client = ZenRowsClient("YOUR-API-KEY", concurrency=5, retries=1)
+
+async def main():
+    urls = [
+        "https://www.zenrows.com/",
+        # ...
+    ]
+    responses = await asyncio.gather(*[client.get_async(url) for url in urls])
+
+    for response in responses:
+        print(response)
+
+asyncio.run(main())
+```
+
 ## Contributing
 Pull requests are welcome. For significant changes, please open an issue first to discuss what you would like to change.
 
