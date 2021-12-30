@@ -89,7 +89,7 @@ async def main():
     responses = await asyncio.gather(*[client.get_async(url) for url in urls])
 
     for response in responses:
-        print(response)
+        print(response.text)
 
 asyncio.run(main())
 ```

@@ -35,17 +35,17 @@ class ZenRowsClient:
         return await loop.run_in_executor(self.executor, self._worker, url, params, headers, **kwargs)
 
     def _worker(self, url: str, params: dict = None, headers: dict = None, **kwargs):
-        if not params:
-            params = {}
+        final_params = {}
+        if params:
+            final_params.update(params)
+        final_params.update({"url": url, "apikey": self.apikey})
 
         if headers:
-            params["custom_headers"] = True
+            final_params["custom_headers"] = True
         else:
             headers = {}
 
         final_headers = {"User-Agent": f"zenrows/{__version__} python"}
         final_headers.update(headers)
 
-        params.update({"url": url, "apikey": self.apikey})
-
-        return self.requests_session.get(self.api_url, params=params, headers=final_headers, **kwargs)
+        return self.requests_session.get(self.api_url, params=final_params, headers=final_headers, **kwargs)
