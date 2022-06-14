@@ -27,14 +27,31 @@ class ZenRowsClient:
             self.requests_session.mount("https://", adapter)
             self.requests_session.mount("http://", adapter)
 
-    def get(self, url: str, params: dict = None, headers: dict = None, **kwargs) -> requests.Response:
-        return self._worker(url, params, headers, **kwargs)
+    def get(
+        self, url: str, params: dict = None, headers: dict = None, **kwargs
+    ) -> requests.Response:
+        return self._worker("GET", url, params, headers, **kwargs)
 
-    async def get_async(self, url: str, params: dict = None, headers: dict = None, **kwargs) -> requests.Response:
+    async def get_async(
+        self, url: str, params: dict = None, headers: dict = None, **kwargs
+    ) -> requests.Response:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, self._worker, url, params, headers, **kwargs)
+        return await loop.run_in_executor(self.executor, self._worker, "GET", url, params, headers, **kwargs)
 
-    def _worker(self, url: str, params: dict = None, headers: dict = None, **kwargs):
+    def post(
+        self, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
+    ) -> requests.Response:
+        return self._worker("POST", url, params, headers, data, **kwargs)
+
+    async def post_async(
+        self, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
+    ) -> requests.Response:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, self._worker, "POST", url, params, headers, data, **kwargs)
+
+    def _worker(
+        self, method, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
+    ):
         final_params = {}
         if params:
             final_params.update(params)
@@ -48,4 +65,6 @@ class ZenRowsClient:
         final_headers = {"User-Agent": f"zenrows/{__version__} python"}
         final_headers.update(headers)
 
-        return self.requests_session.get(self.api_url, params=final_params, headers=final_headers, **kwargs)
+        return self.requests_session.request(
+            method, self.api_url, params=final_params, headers=final_headers, data=data, **kwargs
+        )

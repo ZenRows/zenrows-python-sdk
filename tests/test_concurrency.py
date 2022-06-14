@@ -10,20 +10,20 @@ api_url_base = "https://api.zenrows.com/v1/"
 
 
 class TestZenRowsClientConcurrency(IsolatedAsyncioTestCase):
-    @patch.object(Session, "get")
-    async def test_get_async_requests_url(self, mock_get):
+    @patch.object(Session, "request")
+    async def test_get_async_requests_url(self, mock_request):
         client = ZenRowsClient(apikey, concurrency=2)
 
         await client.get_async(url)
 
-        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(mock_request.call_count, 1)
 
-    @patch.object(Session, "get")
-    async def test_more_urls_than_concurrency(self, mock_get):
+    @patch.object(Session, "request")
+    async def test_more_urls_than_concurrency(self, mock_request):
         client = ZenRowsClient(apikey, concurrency=2)
 
         await client.get_async(url)
         await client.get_async(url)
         await client.get_async(url)
 
-        self.assertEqual(mock_get.call_count, 3)
+        self.assertEqual(mock_request.call_count, 3)
