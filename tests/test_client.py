@@ -1,5 +1,6 @@
 from unittest import mock, TestCase
 from requests import Session
+import urllib3
 
 from zenrows import ZenRowsClient
 from zenrows.__version__ import __version__
@@ -68,7 +69,10 @@ class TestZenRowsClient(TestCase):
             },
             headers={
                 "User-Agent": f"zenrows/{__version__} python",
-                "Referrer": "https://www.google.com"
+                "Referrer": "https://www.google.com",
+                'Accept-Encoding': urllib3.util.SKIP_HEADER,
+                "Connection": None,
+                "Accept": None,
             },
             data=None,
         )
@@ -87,7 +91,10 @@ class TestZenRowsClient(TestCase):
                 "custom_headers": True
             },
             headers={
-                "User-Agent": "MyCustomUserAgent"
+                "User-Agent": "MyCustomUserAgent",
+                'Accept-Encoding': urllib3.util.SKIP_HEADER,
+                "Connection": None,
+                "Accept": None,
             },
             data=None,
         )

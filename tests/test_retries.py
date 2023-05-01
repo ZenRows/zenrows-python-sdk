@@ -26,7 +26,7 @@ class TestZenRowsClientRetries(TestCase):
         mock_retry.assert_called_once_with(
             total=2,
             backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[422, 429, 500, 502, 503, 504],
             raise_on_status=False,
         )
 
