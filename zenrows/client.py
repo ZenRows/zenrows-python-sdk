@@ -4,6 +4,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 import urllib3
+from functools import partial
 
 from .__version__ import __version__
 
@@ -37,7 +38,7 @@ class ZenRowsClient:
         self, url: str, params: dict = None, headers: dict = None, **kwargs
     ) -> requests.Response:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, self._worker, "GET", url, params, headers, **kwargs)
+        return await loop.run_in_executor(self.executor, partial(self._worker, "GET", url, params, headers, **kwargs))
 
     def post(
         self, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
@@ -48,7 +49,7 @@ class ZenRowsClient:
         self, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
     ) -> requests.Response:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self.executor, self._worker, "POST", url, params, headers, data, **kwargs)
+        return await loop.run_in_executor(self.executor, partial(self._worker, "POST", url, params, headers, data, **kwargs))
 
     def _worker(
         self, method, url: str, params: dict = None, headers: dict = None, data: dict = None, **kwargs
