@@ -117,3 +117,22 @@ class TestZenRowsClient(TestCase):
                 "key2": "value2",
             },
         )
+
+    @mock.patch.object(Session, "request")
+    def test_put_with_data(self, mock_request):
+        self.zenrows_client.put(
+            url, data={"key1": "value1", "key2": "value2"})
+
+        mock_request.assert_called_once_with(
+            "PUT",
+            api_url_base,
+            params={
+                "url": url,
+                "apikey": apikey,
+            },
+            headers=default_headers,
+            data={
+                "key1": "value1",
+                "key2": "value2",
+            },
+        )

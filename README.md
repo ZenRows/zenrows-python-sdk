@@ -85,6 +85,24 @@ response = client.post(url, data={
 print(response.text)
 ```
 
+### PUT Requests
+
+The SDK also offers PUT requests by calling the `client.put` method. It can receive a new parameter `data` that represents the data sent in, for example, a form. 
+
+```python
+from zenrows import ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY", retries=1)
+url = "https://httpbin.org/anything"
+
+response = client.put(url, data={
+    "key1": "value1",
+    "key2": "value2",
+})
+
+print(response.text)
+```
+
 ### Concurrency
 
 To limit the concurrency, it uses [asyncio](https://docs.python.org/3/library/asyncio.html), which will simultaneously send a maximum of requests. The concurrency is determined by the plan you are in, so take a look at the [pricing](https://www.zenrows.com/pricing) and set it accordingly. Take into account that each client instance will have its own limit, meaning that two different scripts will not share it, and 429 (Too Many Requests) errors might arise.
