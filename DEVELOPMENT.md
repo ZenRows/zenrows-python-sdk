@@ -2,6 +2,10 @@
 
 Useful commands for development and publishing.
 
+### Install
+
+`make install` will install the dependencies from the `requirements.txt` file.
+
 ### Build
 
 `make build` generates the distribution packages. It will not delete previous builds. Remember to change the `__version__` before publishing or it will fail.

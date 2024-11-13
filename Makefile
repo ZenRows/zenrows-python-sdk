@@ -1,4 +1,7 @@
-.PHONY: build clean lint test
+.PHONY: install build clean lint test
+
+install:
+	pip install -r requirements.txt
 
 build:
 	python setup.py sdist bdist_wheel
