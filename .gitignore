@@ -19,3 +19,16 @@ pip-delete-this-directory.txt
 
 .idea/*
 .vscode/
+
+# uv / venv
+.venv/
+.uv-cache/
+
+# Test + ruff caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local scratch
+.DS_Store

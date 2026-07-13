@@ -1,5 +1,6 @@
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
+
 from requests import Session
 
 from zenrows import ZenRowsClient

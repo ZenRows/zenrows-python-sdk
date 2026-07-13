@@ -1,0 +1,2114 @@
+openapi: 3.1.0
+
+info:
+  title: ZenRows Batch API
+  summary: Asynchronous batch web-scraping API.
+  description: |
+    The ZenRows Batch API is an asynchronous batch web-scraping service.
+    Submit a job containing many URLs; the API scrapes each one, tracks
+    progress, and serves the results back to you. Errors are returned as
+    RFC 7807 Problem JSON.
+
+    ### Model
+    A **Job** is a *template* — a reusable submission with its
+    configuration. A **Run** is one execution of that template; a job
+    has 1+ runs over its lifetime. A **Task** is one URL within one
+    run. The job carries a `latest_run` projection; the authoritative
+    state for execution lives on the run.
+
+    This document is the public API specification.
+  version: "0.2.0"
+
+servers:
+  - url: https://async.api.zenrows.com/v1
+    description: Production
+
+tags:
+  - name: jobs
+    description: Create, inspect, list, close, rerun, and delete scraping jobs.
+  - name: runs
+    description: Inspect runs of a job. Each run is one execution of the job's template.
+  - name: tasks
+    description: Add tasks to an open job's initial run; fetch per-task results and content.
+  - name: hmac
+    description: |
+      Per-org HMAC key lifecycle. A secret is returned to you exactly
+      once, at `/rotate`. These keys sign outbound webhooks when you
+      opt in via `webhook.signature: true` at submit or PUT, so your
+      receiver can verify each delivery. Supports phased rotation with
+      an active key and a staged candidate.
+  - name: job_inputs
+    description: |
+      Caller-uploaded CSV inputs for jobs. Two-step: create a slot
+      (presigned PUT URL + id), upload the CSV, then reference it via
+      `file_input_id` on /jobs. Unclaimed slots expire after 24h.
+  - name: webhook
+    description: |
+      Webhook config testing. The per-job webhook config lives under
+      the `jobs` tag — this tag is for the `POST /webhook/test`
+      endpoint, which lets you validate a receiver (reachability, TLS,
+      signature) before attaching it to a real job.
+
+security:
+  - apiKey: []
+
+paths:
+  /jobs:
+    post:
+      tags: [jobs]
+      operationId: submitJob
+      summary: Submit a new scraping job
+      description: |
+        Validates inputs and authenticates the caller, then persists
+        the job, its first run, and (for small submits) all tasks
+        before returning. Validation failures (4xx) create nothing. A
+        `503` from a storage or queue failure usually creates nothing
+        either, but a late-stage failure can leave the job visible
+        with its run already `stopped` — safe to `DELETE`. Retry a
+        `503` with a **fresh** `Idempotency-Key`: a key claimed by a
+        failed attempt has no stored response and replays as `409`.
+
+        Submissions under 10,000 inline `tasks` return `201 Created`
+        with the task rows already in place — results are immediately
+        queryable via `GET /v1/jobs/{id}/results`.
+
+        Submissions at or above **10,000 inline tasks** are processed
+        off the request path and return `202 Accepted` — `accepted_tasks`
+        is the final validated count, but task rows stream into
+        storage over the following seconds (large submissions can take
+        longer). `GET /v1/jobs/{id}/results` returns only the rows
+        written so far until ingest completes; the run's `stats.total`
+        is correct from the start so completion polling
+        (`stats.completed >= stats.total`) is reliable from the first
+        response. While ingestion is in progress,
+        `POST /v1/jobs/{id}/tasks` on an open job returns `409` —
+        retry it once results pages fill out. The run's
+        `ingest_status` field reports the ingest state: poll
+        `GET /v1/jobs/{id}` until `latest_run.ingest_status` is
+        `done` to know every task row is visible.
+
+        `type: scheduled` is reserved for a future feature and
+        currently returns `501 not_implemented`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitJobRequest' }
+      responses:
+        '201':
+          description: Job created (sync path). Run 1 is started and all task rows are written.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/RequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubmitJobResponse' }
+        '202':
+          description: |
+            Job accepted (large submission). The validated task list
+            is durable and `accepted_tasks` is the final count, but
+            individual task rows stream into storage off the request
+            path. `GET /v1/jobs/{id}/results` may return partial pages
+            until ingest completes; the run's
+            `stats.total` is correct from this response forward and
+            `stats.completed` climbs from 0, so the run reaches
+            `completed` only after every task drains — completion
+            polling is safe. `latest_run.ingest_status` is `pending`
+            in this response and flips to `done` on `GET /v1/jobs/{id}`
+            once every task row is visible. Body shape matches the
+            201 response.
+          headers:
+            X-Request-ID: { $ref: '#/components/headers/RequestID' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubmitJobResponse' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '409': { $ref: '#/components/responses/IdempotencyConflict' }
+        '501': { $ref: '#/components/responses/NotImplemented' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+    get:
+      tags: [jobs]
+      operationId: listJobs
+      summary: List jobs for the authenticated caller
+      description: |
+        Newest-first (ULID-ordered). Optional `status` / `type` filters.
+      parameters:
+        - in: query
+          name: status
+          schema: { $ref: '#/components/schemas/JobStatus' }
+        - in: query
+          name: type
+          schema: { $ref: '#/components/schemas/JobType' }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          description: Opaque; echo the previous response's `next_cursor` to continue.
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of jobs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListJobsResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /jobs/{job_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [jobs]
+      operationId: getJob
+      summary: Get a job (template + latest_run projection)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [jobs]
+      operationId: deleteJob
+      summary: Delete a job and all its artifacts (asynchronous)
+      description: |
+        Flips the job to `deleted` immediately and **flips the latest
+        run to `deleted`** if it was in-flight (so no new tasks get
+        picked up), then returns 202. The job's stored result bodies
+        and all of its data are deleted asynchronously in the
+        background. Idempotent.
+      responses:
+        '202':
+          description: Accepted for deletion.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [tasks]
+      operationId: addTasks
+      summary: Append tasks to an open job's initial run
+      description: |
+        Valid only when the job is `open` AND its latest run is
+        `run_sequence == 1` AND `last_batch_received == false`.
+        Targets the latest (initial) run. Closed/deleted jobs and
+        reruns reject further adds with 409.
+
+        Setting `last_batch: true` closes the job (status → `closed`)
+        and signals the run to flip to `completed` once tasks drain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddTasksRequest' }
+      responses:
+        '200':
+          description: Tasks queued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AddTasksResponse' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            Job is not open, last batch already received, or the
+            initial run's task ingestion is still in progress (large
+            `202`-accepted submissions) — in the last case, retry
+            once ingest completes.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/close:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: closeJob
+      summary: Close an open job (no more tasks coming)
+      description: |
+        Flips `job.status` from `open` to `closed` and sets the
+        initial run's `last_batch_received = true`. Same effect as
+        posting `addTasks` with `last_batch: true` and zero tasks.
+
+        Does NOT stop the job — any pending or processing tasks
+        continue. If all known tasks are already terminal, the run
+        flips to `completed` immediately.
+
+        Idempotent: calling on an already-closed job returns the
+        current state with 200.
+      responses:
+        '200':
+          description: Close accepted. Body is the refreshed Job object.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/stop:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: stopJob
+      summary: Stop the current run
+      description: |
+        Synchronously transitions `latest_run.status` from `running`
+        or `pending` to terminal `stopped`. No new tasks are picked
+        up; tasks already in flight may still finish and record their
+        result. Pending tasks are left as-is — not re-queued, not
+        synchronously failed.
+
+        Result bodies are kept. To free the storage, follow up with
+        `DELETE /v1/jobs/{id}/runs/{run_id}`.
+
+        Idempotent on `stopped`. Returns 409 on `completed` /
+        `deleted` (use `/rerun` to start fresh) and 404 on a deleted
+        job.
+      responses:
+        '200':
+          description: Run is stopped. Body is the refreshed Run object.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Latest run is not in a stoppable state.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: cancelJob
+      summary: Cancel the current run
+      description: |
+        User-facing alias for `/stop`. Same semantics, same terminal
+        `stopped` state, same response shape. Provided so callers
+        using the noun "cancel" don't have to learn the internal name.
+      responses:
+        '200':
+          description: Run is stopped. Body is the refreshed Run object.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Latest run is not in a stoppable state.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/pause:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: pauseJob
+      summary: Pause the current run
+      description: |
+        Reversible suspend of the latest run. Sets
+        `latest_run.pause_state = paused`; the dispatcher stops
+        polling this run's queue. The run's `status`
+        (`running` / `pending`) is unchanged — pause is orthogonal.
+        Already-in-flight tasks may still settle.
+
+        Idempotent on already-paused runs. Returns 409 when the
+        latest run is terminal (use `/rerun` to start fresh) and
+        404 on a deleted job.
+
+        Billing note: in-flight gateway calls still consume credits.
+        Use `/cancel` for a hard cost-stop.
+      responses:
+        '200':
+          description: Run is paused. Body is the refreshed Run object.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Latest run is terminal; pause does not apply.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/resume:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: resumeJob
+      summary: Resume a paused run
+      description: |
+        Inverse of `/pause`. Sets `latest_run.pause_state = active`;
+        the dispatcher resumes polling. Idempotent on already-active
+        runs.
+      responses:
+        '200':
+          description: Run is active. Body is the refreshed Run object.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Latest run is terminal; resume does not apply.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/rerun:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: rerunJob
+      summary: Start a new run (full replay or partial retry of the previous run)
+      description: |
+        Two modes share this endpoint, picked by the optional
+        `?status=` filter:
+
+        **Full rerun (no `status`).** Replays every task from the
+        previous run into a fresh new run. Same `task_id` carries
+        through together with `external_id`, `url`, `metadata`, and
+        per-task `zenrows_params`. **No source-child link** — the
+        new run is fully independent. For scheduled jobs with no
+        prior run, builds from `template_tasks` instead — the
+        manual equivalent of an automatic scheduled fire.
+
+        **Partial retry (`?status=failed[,pending,...]`).** Copies
+        every prev-run task row, but rows matching the filter are
+        reset to `pending` and re-enqueued; everything else is
+        copied verbatim with `source_run_id` (the run that owns the
+        stored result) stamped. The new run's stats are pre-seeded
+        from the inherited terminal rows. On chained retries,
+        `source_run_id` chases back to the run that owns the result
+        so intermediate retries can be deleted freely;
+        `DELETE /v1/jobs/{id}/runs/{run_id}` only 409s when a
+        newer run still has tasks pointing at the targeted run.
+
+        Both modes stamp `trigger: manual` on the new run.
+
+        Accepted `status` values: `pending`, `processing`,
+        `failed`, `successful`. Unknown values → 400. Empty
+        comma-separated list → 400.
+
+        Preconditions:
+        - The job is not `deleted`.
+        - If a previous run exists, it must be terminal-non-deleted
+          (`completed` / `stopped` / `failed`).
+        - `?status=` mode additionally requires a prior run.
+        - Full mode on a scheduled job with no prior run requires
+          non-empty `template_tasks`.
+
+        Side effects:
+        - Auto-closes an `open` job (existing behavior).
+        - Honors `Idempotency-Key`: a repeat call with the same
+          key returns the original new-run id.
+      parameters:
+        - in: query
+          name: status
+          description: |
+            Optional comma-separated list of task statuses to
+            retry. When omitted: full replay (no source-child
+            link). When set: only matching statuses are reset to
+            `pending`; everything else is inherited with
+            `source_run_id`.
+          schema:
+            type: string
+            example: failed,pending
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: New run created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RerunJobResponse' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Latest run not terminal, no prior run available, no tasks match the filter, or idempotency-key reused with a different body.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /jobs/{job_id}/schedule:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    put:
+      tags: [jobs]
+      operationId: updateJobSchedule
+      summary: Replace the schedule of a scheduled job
+      description: |
+        Wholesale replaces the schedule on a `type: scheduled` job.
+        The body is the same `JobSchedule` shape used at submit.
+        Only valid on scheduled jobs — regular jobs reject with 409.
+
+        An in-flight run keeps running; the new schedule only
+        governs future fires. `next_scheduled_run` is recomputed
+        and re-stamped before the response returns.
+
+        Naturally idempotent — re-applying the same body is a
+        no-op success. No `Idempotency-Key` required.
+
+        The change is applied atomically from your perspective; if a
+        transient failure leaves `next_scheduled_run` briefly stale,
+        re-PUT the same body to recover (the operation is idempotent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobSchedule' }
+      responses:
+        '200':
+          description: Schedule updated; returns the updated Job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Job isn't a scheduled job.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /jobs/{job_id}/schedule/state:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    post:
+      tags: [jobs]
+      operationId: updateScheduleState
+      summary: Pause or resume a scheduled job
+      description: |
+        Flips `schedule_state` between `active` and `paused`. Only
+        valid on `type: scheduled` jobs.
+
+        While `paused`, scheduled fires are skipped; resuming makes
+        the next scheduled fire produce a run normally.
+
+        `next_scheduled_run` stays computed while paused —
+        it's "what would fire next if you resumed."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateScheduleStateRequest' }
+      responses:
+        '200':
+          description: Schedule state updated; returns the updated Job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Job isn't a scheduled job.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /jobs/{job_id}/webhook:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [jobs]
+      operationId: getJobWebhook
+      summary: Read the current webhook config
+      description: |
+        Returns the job's webhook config or `404` when none is set.
+        The same shape is also surfaced inline on `GET /v1/jobs/{id}`
+        via the `webhook` field.
+      responses:
+        '200':
+          description: Webhook is configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookConfig' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404':
+          description: Job not found, or no webhook configured.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    put:
+      tags: [jobs]
+      operationId: putJobWebhook
+      summary: Replace the webhook config
+      description: |
+        Replaces the webhook config wholesale. Both `url` and
+        `signature` are required — no defaulting at the mutate
+        boundary (preventing a `PUT {"url":"..."}` from silently
+        disabling signing on a job that previously had it on).
+
+        Validation matches submit: URL must be HTTPS with a host
+        that resolves via DNS within 1 second. When `signature:
+        true`, the org must already have an active HMAC key
+        (`POST /v1/hmac/keys/rotate`), or the request fails with
+        `400 webhook_signing_requires_active_key`.
+
+        A `PUT` mid-retry-cycle is picked up on the next delivery
+        attempt — config is read fresh on every dispatch hop.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookConfig' }
+      responses:
+        '200':
+          description: New webhook config persisted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookConfig' }
+        '400':
+          description: Validation failed (HTTPS / DNS / missing active HMAC key).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Concurrent modification — retry the request.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [jobs]
+      operationId: deleteJobWebhook
+      summary: Clear the webhook config
+      description: |
+        Idempotent: returns `204` whether or not a webhook was
+        configured. After this call no further `run.completed` /
+        `run.failed` deliveries are sent for this Job — including a
+        currently-in-flight one that hasn't been delivered yet
+        (a delivery whose Job no longer has a webhook configured is
+        dropped).
+      responses:
+        '204': { description: Webhook cleared. }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Concurrent modification — retry the request.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/runs:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [runs]
+      operationId: listJobRuns
+      summary: List runs of a job (newest first)
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+      responses:
+        '200':
+          description: Page of runs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListJobRunsResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/runs/{run_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [runs]
+      operationId: getJobRun
+      summary: Get one run by id
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [runs]
+      operationId: deleteJobRun
+      summary: Delete one run and its artifacts (asynchronous)
+      description: |
+        Async hard-delete of a single run. Synchronously: flips the
+        run to `deleted` and (if this was the latest run) updates
+        the job's `latest_run` projection to the next-newest
+        non-deleted run. The run's stored result bodies and its
+        per-task data are then deleted asynchronously.
+
+        Distinct from `/stop`: this deletes the result bodies; `/stop`
+        keeps them. To stop a run *and* free its storage, call
+        `/stop` then `DELETE /runs/{run_id}` (order matters only
+        for semantics — both are idempotent).
+
+        Idempotent — re-DELETE returns 202.
+      responses:
+        '202':
+          description: Accepted for deletion.
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/results:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+    get:
+      tags: [tasks]
+      operationId: listLatestRunResults
+      summary: Page through per-task results for the latest run of a job
+      description: Shortcut for the latest run; see `listRunResults` for the explicit form.
+      parameters:
+        - { $ref: '#/components/parameters/ResultStatus' }
+        - { $ref: '#/components/parameters/ResultCursor' }
+      responses:
+        '200':
+          description: Page of results.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResultsResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/runs/{run_id}/results:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+    get:
+      tags: [tasks]
+      operationId: listRunResults
+      summary: Page through per-task results for a specific run
+      parameters:
+        - { $ref: '#/components/parameters/ResultStatus' }
+        - { $ref: '#/components/parameters/ResultCursor' }
+      responses:
+        '200':
+          description: Page of results.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ListResultsResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/tasks/{task_id}/content:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/TaskID'
+    get:
+      tags: [tasks]
+      operationId: getLatestRunTaskContent
+      summary: Fetch the scraped content for a task in the latest run
+      description: Latest-run shortcut. See `getRunTaskContent` for explicit-run form.
+      responses:
+        '200':
+          description: Scraped content.
+          content:
+            text/html:
+              schema: { type: string }
+            application/json:
+              schema: { type: object }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Task is still pending or processing.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Task is failed. Body is the captured error as Problem JSON.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/runs/{run_id}/tasks/{task_id}/content:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+      - $ref: '#/components/parameters/TaskID'
+    get:
+      tags: [tasks]
+      operationId: getRunTaskContent
+      summary: Fetch the scraped content for a task in a specific run
+      responses:
+        '200':
+          description: Scraped content.
+          content:
+            text/html:
+              schema: { type: string }
+            application/json:
+              schema: { type: object }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Task is still pending or processing.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Task is failed. Body is the captured error as Problem JSON.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{job_id}/tasks/{task_id}/history:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/TaskID'
+    get:
+      tags: [tasks]
+      operationId: getLatestRunTaskHistory
+      summary: Get the attempt history for a task in the latest run
+      responses:
+        '200':
+          description: List of attempt events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskHistoryResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/runs/{run_id}/tasks/{task_id}/history:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+      - $ref: '#/components/parameters/TaskID'
+    get:
+      tags: [tasks]
+      operationId: getRunTaskHistory
+      summary: Get the attempt history for a task in a specific run
+      responses:
+        '200':
+          description: List of attempt events.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskHistoryResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /hmac/keys:
+    get:
+      tags: [hmac]
+      operationId: listHMACKeys
+      summary: List the org's HMAC key metadata
+      description: |
+        Returns kid + created_at for whichever slots are populated
+        (active and/or candidate). NEVER returns secret material —
+        the only chance to capture a secret is the rotate response.
+      responses:
+        '200':
+          description: Key metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HMACKeyList' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /hmac/keys/rotate:
+    post:
+      tags: [hmac]
+      operationId: rotateHMACKey
+      summary: Generate the initial key, or stage a candidate
+      description: |
+        Unified rotation endpoint:
+        - No active key yet → generates the org's first active key.
+        - Active exists, no candidate → generates a candidate for
+          phased rotation.
+        - Both slots populated → 409 `candidate_pending`. Finalize
+          or cancel first.
+
+        The response body's `secret` is the **only** time the raw
+        key value leaves the service. Capture it now or call rotate
+        again to issue a new one.
+      responses:
+        '201':
+          description: Key created. `secret` returned once.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HMACKeyCreated' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409':
+          description: Candidate already pending.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [hmac]
+      operationId: cancelHMACRotation
+      summary: Discard the pending candidate
+      description: |
+        Drops the candidate slot. Idempotent: returns 204 even when
+        no candidate is present.
+      responses:
+        '204':
+          description: Candidate discarded (or none was pending).
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /hmac/keys/rotate/finalize:
+    post:
+      tags: [hmac]
+      operationId: finalizeHMACKey
+      summary: Promote the candidate to active
+      description: |
+        Promotes the pending candidate to active; the prior active
+        is discarded. Returns the new active's metadata; no secret.
+        Returns 409 `no_candidate` if nothing is pending.
+      responses:
+        '200':
+          description: Candidate promoted.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HMACKeyFinalized' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '409':
+          description: No candidate to finalize, or concurrent modification.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /webhook/test:
+    post:
+      tags: [webhook]
+      operationId: testWebhook
+      summary: Send a synthetic test event to a webhook URL
+      description: |
+        Synchronous one-shot dispatch of a `webhook.test` event
+        against a caller-supplied URL. Independent of any job — body
+        carries the same `{ url, signature }` shape as the submit-time
+        webhook field. Used by integrators to verify a receiver is
+        reachable, terminates TLS, and validates the signature before
+        attaching the URL to a real job.
+
+        Validation is identical to submit (HTTPS, 1-second DNS lookup,
+        active HMAC key required when `signature: true`). On validation
+        failure, returns the same Problem JSON codes
+        (`callback_url_must_be_https`, `callback_url_unresolvable`,
+        `webhook_signing_requires_active_key`).
+
+        On validation pass, always returns `200 OK`; the receiver
+        outcome rides in the body so callers can distinguish
+        "the API rejected my config" (4xx) from "my receiver
+        returned 500" (200 + `delivered: false`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestWebhookRequest' }
+      responses:
+        '200':
+          description: |
+            Dispatch attempted. Inspect `delivered` to see whether the
+            receiver returned 2xx.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestWebhookResponse' }
+        '400':
+          description: |
+            Validation failed — HTTPS / DNS / missing active HMAC key.
+            The receiver was not contacted.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '503': { $ref: '#/components/responses/Unavailable' }
+
+  /job_inputs:
+    post:
+      tags: [job_inputs]
+      operationId: createJobInput
+      summary: Create a CSV upload slot
+      description: |
+        Allocates a `file_input_id`, persists the parse spec, and
+        returns a presigned PUT URL the caller uploads the CSV body
+        to. The slot lives 24 h; subsequent `POST /v1/jobs` references
+        it by `file_input_id`.
+
+        The CSV is parsed when the job is submitted, where a
+        50 MB / 100 000-row cap is enforced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateJobInputRequest' }
+      responses:
+        '201':
+          description: Slot created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateJobInputResponse' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /jobs/{job_id}/runs/{run_id}/exports:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+    post:
+      tags: [runs]
+      operationId: startResultsExport
+      summary: Start an async results export
+      description: |
+        Kicks off an async zip of every task body in the run for
+        short-term download. Returns an `export_id` immediately; poll
+        `getResultsExport` for status and the presigned download URL.
+
+        Each export expires 12 h after creation, after which the id
+        404s. There is no delete / update — expiry is the cleanup.
+
+        The export fails with
+        `error: "results are larger then 1 gb"` if the combined size
+        of the results exceeds the 1 GiB cap.
+      responses:
+        '202':
+          description: Export accepted; the zip is produced asynchronously.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StartExportResponse' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{job_id}/runs/{run_id}/exports/{export_id}:
+    parameters:
+      - $ref: '#/components/parameters/JobID'
+      - $ref: '#/components/parameters/RunID'
+      - $ref: '#/components/parameters/ExportID'
+    get:
+      tags: [runs]
+      operationId: getResultsExport
+      summary: Poll a results export
+      description: |
+        Returns the current status and (on `completed`) a freshly
+        presigned `download_url`. The URL is signed on every call,
+        so callers may stash the metadata but should re-fetch right
+        before downloading.
+
+        404 covers both "id doesn't exist" and "expired" — callers
+        treat them the same.
+      responses:
+        '200':
+          description: Export state (with `download_url` once complete).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Export' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: |
+        API key issued via the zenrows account. Only the header
+        transport is accepted — query-param keys are rejected.
+
+  parameters:
+    JobID:
+      name: job_id
+      in: path
+      required: true
+      description: ULID assigned by the server on submit.
+      schema: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      description: ULID assigned by the server when a run is created (submit or rerun).
+      schema: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+    TaskID:
+      name: task_id
+      in: path
+      required: true
+      description: Task id within a run (ULID-generated or caller-supplied).
+      schema: { type: string, pattern: '^[A-Za-z0-9._-]{1,128}$' }
+    ExportID:
+      name: export_id
+      in: path
+      required: true
+      description: ULID assigned by the server when a results export is started.
+      schema: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional opaque token scoping a single submit / rerun
+        request. Re-submitting with the same key returns the
+        original response (or 409 on body mismatch).
+      schema: { type: string, maxLength: 128 }
+    ResultStatus:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum: [all, successful, failed, processing]
+        default: all
+      description: |
+        `processing` covers both `pending` and `processing` task
+        states (anything not yet terminal).
+    ResultCursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque pagination token; echo `next_cursor`.
+
+  headers:
+    RequestID:
+      description: Correlation ID echoed from the server. Use in support requests.
+      schema: { type: string }
+
+  responses:
+    InvalidArgument:
+      description: Request validation failed.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthenticated:
+      description: Missing / invalid API key.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    PaymentRequired:
+      description: Subscription has no credit available.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    IdempotencyConflict:
+      description: Idempotency-Key has already been used by this caller with a different body.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found (or not owned by caller).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotImplemented:
+      description: Feature is reserved but not yet implemented.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: Transient upstream failure; safe to retry.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    JobType:
+      type: string
+      enum: [regular, scheduled]
+      default: regular
+      description: |
+        - `regular` — a run is created at submit time.
+        - `scheduled` — fires on a recurring or one-shot schedule.
+          Submit stores the task list as a template on the job row;
+          each scheduled fire produces a fresh Run. `schedule`
+          field required. Read-only template: `addTasks` and
+          `close` return 409. `rerun` (full or filtered) and `stop`
+          are allowed.
+
+    JobStatus:
+      type: string
+      enum: [open, closed, deleted]
+      description: |
+        - `open` — initial run still accepting `addTasks`. Only
+          meaningful while `latest_run.run_sequence == 1`.
+        - `closed` — no more tasks accepted (created closed, or
+          closed via `/close` / `addTasks{last_batch}` / `/rerun`).
+        - `deleted` — async deletion in progress; the job disappears
+          once it finishes.
+
+    ScheduleState:
+      type: string
+      enum: [active, paused]
+      description: |
+        Run/pause flag on a scheduled job. While `paused`, scheduled
+        fires are skipped. Default at submit: `active`. Flip via
+        `POST /v1/jobs/{id}/schedule/state`.
+
+    UpdateScheduleStateRequest:
+      type: object
+      required: [schedule_state]
+      properties:
+        schedule_state: { $ref: '#/components/schemas/ScheduleState' }
+
+    RunTrigger:
+      type: string
+      enum: [manual, scheduled]
+      description: |
+        What set this run in motion. Always set.
+        - `manual` — caller-initiated: `POST /jobs`, `POST /jobs/{id}/rerun`
+          (any job type, full or `?status=`-filtered, manual fire of
+          a scheduled job).
+        - `scheduled` — automatic, fired by the configured
+          schedule (recurring or one-shot).
+
+    RunStatus:
+      type: string
+      enum: [running, pending, completed, stopped, failed, deleted]
+      description: |
+        In-flight:
+        - `running` — work queued / in flight.
+        - `pending` — initial run of an open job, idle between batches.
+
+        Terminal:
+        - `completed` — natural finish.
+        - `stopped` — caller called `POST /jobs/{id}/stop`. No new
+          tasks are picked up; in-flight tasks may still finish.
+          Result bodies are kept. `stats.completed < stats.total`
+          signals "stopped early".
+        - `failed` — the run was auto-failed on an account-level error
+          (insufficient credits / inactive subscription). No new tasks
+          are picked up; `failure_reason` carries the cause. Re-runnable
+          once the account is resolved. Result bodies already produced
+          are kept.
+        - `deleted` — caller called
+          `DELETE /v1/jobs/{id}/runs/{run_id}`. The run's result
+          bodies and data are being deleted; once complete the run
+          disappears.
+
+    TaskStatus:
+      type: string
+      enum: [pending, processing, successful, failed]
+
+    ResultType:
+      type: string
+      enum: [html, json, markdown, plaintext, pdf]
+      description: Body format of a successful task result; matches the job's `format` 1:1.
+
+    Format:
+      type: string
+      enum: [html, json, markdown, plaintext, pdf]
+      description: |
+        Derived server-side from `zenrows_params` at submit time.
+        Precedence:
+          - `response_type: markdown|plaintext|pdf` → matching format.
+          - `autoparse: true`, `json_response: true`, or non-empty
+            `css_extractor` → `json`.
+          - otherwise → `html`.
+        Stamped on every successful task result and used to set the
+        right `Content-Type` when you fetch the content.
+
+    Metadata:
+      type: object
+      description: Opaque user-supplied key/value pairs. Stored on the task; not forwarded.
+      additionalProperties:
+        type: string
+        maxLength: 1024
+      maxProperties: 20
+
+    ScraperParams:
+      type: object
+      description: |
+        Subset of the zenrows universal-scraper-API parameter overview
+        (https://docs.zenrows.com/universal-scraper-api/api-reference).
+        The API pins the surface to a known set — unknown keys are
+        rejected with `400 invalid_argument` (`unknown_param`). The
+        `screenshot*` family is deliberately excluded; `mode` accepts
+        `"auto"` only for now.
+
+        Each value can be any JSON scalar (string, boolean, integral
+        number); the API coerces to a string internally.
+
+        Per-task `zenrows_params` override job-level `zenrows_params`
+        on key collision.
+
+        Supported keys: `mode`, `js_render`, `js_instructions`,
+        `custom_headers`, `premium_proxy`, `proxy_country`,
+        `session_id`, `original_status`, `allowed_status_codes`,
+        `wait_for`, `wait`, `block_resources`, `json_response`,
+        `css_extractor`, `autoparse`, `response_type`, `outputs`.
+      additionalProperties:
+        oneOf:
+          - { type: string }
+          - { type: boolean }
+          - { type: integer }
+
+    TaskInput:
+      type: object
+      required: [url]
+      properties:
+        external_id:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._-]+$'
+          description: |
+            Optional caller-supplied correlation id — typically an
+            identifier from the caller's own system. Surfaced verbatim
+            in result/content responses so callers can match results
+            back to their records. **Not required to be unique** —
+            callers may reuse the same value across tasks (e.g. when
+            multiple scrapes correlate to the same upstream record).
+            Independent of the server-
+            assigned `task_id`.
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Must be http(s). Other schemes rejected at submit.
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        zenrows_params:
+          $ref: '#/components/schemas/ScraperParams'
+          description: |
+            Per-task scraper params. Override the job-level
+            `zenrows_params` on key collision (task wins).
+
+    SubmitJobRequest:
+      type: object
+      properties:
+        type: { $ref: '#/components/schemas/JobType' }
+        status:
+          type: string
+          enum: [open, closed]
+          default: closed
+          description: |
+            Initial state. `open` is only allowed for `regular` jobs;
+            after the initial run, `open` has no meaning so the job
+            is auto-closed.
+        zenrows_params:
+          $ref: '#/components/schemas/ScraperParams'
+          description: |
+            Job-level scraper params, applied to every task of every
+            run of the job. Each task can override individual keys
+            via its own `zenrows_params` (task wins on collision).
+        schedule:
+          $ref: '#/components/schemas/JobSchedule'
+          description: |
+            Schedule block for `type: scheduled`. Required there,
+            ignored otherwise.
+        tasks:
+          type: array
+          description: |
+            Required for closed jobs (1–1000) unless `file_input_id`
+            is provided. Optional for open jobs — may be empty if the
+            caller will follow up with `addTasks`. Mutually exclusive
+            with `file_input_id`.
+          minItems: 0
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/TaskInput' }
+        file_input_id:
+          type: string
+          description: |
+            Reference to a previously-uploaded CSV input (see
+            `POST /v1/job_inputs`). Mutually exclusive with `tasks`.
+            Eligible only for regular-closed and scheduled job types.
+            The uploaded CSV is parsed under the saved spec; its rows
+            become tasks (regular-closed) or template_tasks
+            (scheduled).
+        external_id:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9._-]+$'
+          description: |
+            Optional caller-supplied correlation id for the job —
+            same semantics as `task.external_id`. Shape-checked,
+            **not** required to be unique. Surfaced verbatim in
+            `getJob` / `listJobs` responses.
+        name:
+          type: string
+          maxLength: 100
+          description: |
+            Optional human-readable label for the job. Free-form —
+            no shape rules. Up to 100 characters. Surfaced verbatim
+            in `getJob` / `listJobs` responses. No uniqueness, no
+            indexing; cannot be changed after submit.
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        webhook:
+          $ref: '#/components/schemas/WebhookConfig'
+          description: |
+            Optional `run.completed` / `run.failed` delivery config.
+            A terminal run fires `run.completed` on a natural finish, or
+            `run.failed` (with `failure_reason` + partial stats) when the
+            run auto-fails on an account-level error. `signature`
+            defaults to `false` here so first-time integrations
+            don't need an HMAC key. Config is mutable post-submit
+            via `PUT /v1/jobs/{id}/webhook` and `DELETE
+            /v1/jobs/{id}/webhook`; the current config is surfaced
+            on `GET /v1/jobs/{id}`.
+
+    SubmitJobResponse:
+      type: object
+      required: [job_id, status, accepted_tasks]
+      properties:
+        job_id: { type: string }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        latest_run:
+          $ref: '#/components/schemas/Run'
+          description: Absent for `scheduled` jobs that haven't fired yet.
+        accepted_tasks: { type: integer }
+        webhook:
+          $ref: '#/components/schemas/WebhookConfig'
+          description: |
+            Echo of the webhook config persisted on the job (when
+            one was supplied). Omitted when no webhook was set.
+
+    AddTasksRequest:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/TaskInput' }
+        last_batch:
+          type: boolean
+          default: false
+          description: |
+            Set true on the final batch. Closes the job (status →
+            `closed`) and marks the run's `last_batch_received`.
+
+    AddTasksResponse:
+      type: object
+      required: [accepted_tasks, job_status, latest_run]
+      properties:
+        accepted_tasks: { type: integer }
+        job_status: { $ref: '#/components/schemas/JobStatus' }
+        latest_run: { $ref: '#/components/schemas/Run' }
+
+    RerunJobResponse:
+      type: object
+      required: [job_id, status, latest_run, retried_tasks, inherited_tasks]
+      properties:
+        job_id: { type: string }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        latest_run: { $ref: '#/components/schemas/Run' }
+        rerun_of:
+          type: string
+          description: |
+            `run_id` of the previous run that was replayed. Empty on
+            the first manual fire of a scheduled job (no prior run).
+        retried_tasks:
+          type: integer
+          description: |
+            Number of rows reset to `pending` and re-enqueued. Equals
+            `latest_run.stats.total` for a full rerun; equals the
+            filter-matched count for a `?status=` partial retry.
+        inherited_tasks:
+          type: integer
+          description: |
+            Number of rows copied verbatim from the previous run with
+            `source_run_id` stamped. Zero for a full rerun; non-zero
+            only when `?status=` is set.
+
+    Spend:
+      type: object
+      description: |
+        Indicative `{credits, cost}` pair — what was charged for
+        the scoped work. **Not billing-grade**; your account
+        statement is authoritative. Use as a "how much did this
+        cost?" indicator, not for reconciliation.
+      required: [credits, cost]
+      properties:
+        credits: { type: integer, minimum: 0 }
+        cost: { type: number, format: double, minimum: 0 }
+
+    TaskSpend:
+      type: object
+      description: |
+        Per-task indicative spend with two roll-ups: `total`
+        accumulates across every attempt (including retries),
+        `last_attempt` carries just the most recent gateway call.
+        On a task that succeeded on its first try the two are
+        equal; on a retried task they diverge.
+      required: [total, last_attempt]
+      properties:
+        total: { $ref: '#/components/schemas/Spend' }
+        last_attempt: { $ref: '#/components/schemas/Spend' }
+
+    RunStats:
+      type: object
+      required: [total, completed, successful, failed]
+      properties:
+        total: { type: integer, description: Number of tasks in this run. }
+        completed: { type: integer, description: successful + failed. }
+        successful: { type: integer }
+        failed: { type: integer }
+        failure_reasons:
+          type: object
+          description: |
+            Coarse rollup of terminal failures keyed by a small public
+            taxonomy. Lets you answer "what kinds of failures did I
+            get?" without paging every error blob. Best-effort,
+            indicative — omitted on runs with no failures yet and on
+            runs that predate the feature.
+
+            Vocabulary (the only keys that appear):
+            - `auth_failed` — credentials or billing
+            - `blocked` — anti-bot / policy denials
+            - `bad_target` — target URL is the problem (bad host, 404, 410, too large)
+            - `rate_limited` — target throttled the request
+            - `timeout` — the scrape didn't complete in time
+            - `gateway_error` — ZenRows-side transport / 5xx
+            - `other` — anything else
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            blocked: 9
+            gateway_error: 4
+        spend:
+          allOf: [{ $ref: '#/components/schemas/Spend' }]
+          description: |
+            Indicative spend summed across every task attempt in
+            this run. Absent on runs whose tasks predate this
+            field (treat as zero).
+
+    Run:
+      type: object
+      required: [run_id, job_id, run_sequence, status, stats, created_at, updated_at]
+      properties:
+        run_id: { type: string }
+        job_id: { type: string }
+        run_sequence: { type: integer, minimum: 1 }
+        status: { $ref: '#/components/schemas/RunStatus' }
+        stats: { $ref: '#/components/schemas/RunStats' }
+        last_batch_received:
+          type: boolean
+          description: |
+            Meaningful only for the initial run of an open job.
+            Once true, `addTasks` is rejected and the run drains
+            into `completed`.
+        pause_state:
+          type: string
+          enum: [active, paused]
+          description: |
+            Reversible-suspend flag, orthogonal to `status`.
+            Omitted from responses when `active` / absent (legacy
+            rows). Flip via `POST /jobs/{id}/pause` and
+            `/resume`.
+        ingest_status:
+          type: string
+          enum: [pending, done]
+          description: |
+            Present only on runs created by a large (202) submission.
+            `pending` — task rows are still streaming into storage;
+            reads may return partial pages and `addTasks` returns
+            `409`. `done` — every accepted task row is visible.
+            Omitted on runs whose tasks were written on the request
+            path (201 submissions, `addTasks` batches, reruns).
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        failure_reason:
+          type: string
+          enum: [insufficient_credits, subscription_inactive]
+          description: |
+            Present only when `status == failed`: the account-level
+            cause of the auto-fail. `insufficient_credits` (out of
+            credits) or `subscription_inactive` (subscription not
+            active). Omitted otherwise. Distinct from
+            `stats.failure_reasons` (the per-task rollup).
+
+    JobSchedule:
+      type: object
+      description: |
+        Structured scheduling block attached to `type: scheduled`
+        jobs. Exactly one of `at`, `rate`, or `calendar` must be
+        set.
+      properties:
+        at:
+          type: string
+          description: |
+            One-shot fire at a specific wall-clock timestamp.
+            Mutually exclusive with `rate` and `schedule`.
+
+            **Must be tz-naive** — no trailing `Z`, no offset. The
+            sibling `timezone` field (mandatory) is the single
+            authoritative interpreter. This keeps DST transitions
+            deterministic.
+          example: "2026-09-01T09:00:00"
+        rate:
+          $ref: '#/components/schemas/ScheduleRate'
+        calendar:
+          $ref: '#/components/schemas/ScheduleCalendar'
+        timezone:
+          type: string
+          description: |
+            IANA timezone name (e.g. `Europe/Berlin`, `UTC`).
+            **Required** when `at` or `calendar` is set;
+            ignored by `rate` (interval-based, no wall-clock
+            meaning). Anchoring wall-clock times to a named zone
+            (rather than a UTC offset baked into the string) keeps
+            DST transitions deterministic.
+          example: "Europe/Berlin"
+
+    ScheduleRate:
+      type: object
+      required: [every, unit]
+      description: Interval-based fire policy — every N units.
+      properties:
+        every:
+          type: integer
+          minimum: 1
+          example: 15
+        unit:
+          type: string
+          enum: [minute, hour, day]
+
+    ScheduleCalendar:
+      type: object
+      required: [times_of_day, cadence]
+      description: |
+        Calendar-style fire policy. Fires at every `times_of_day`
+        entry on every day matching the cadence.
+      properties:
+        times_of_day:
+          type: array
+          minItems: 1
+          description: |
+            Wall-clock times on a 24-hour clock, full hours only
+            (`"09:00"`, `"18:00"`). Minute granularity is rejected
+            with 400.
+          items:
+            type: string
+            pattern: '^([01][0-9]|2[0-3]):00$'
+          example: ["09:00", "18:00"]
+        cadence:
+          $ref: '#/components/schemas/ScheduleCadence'
+
+    ScheduleCadence:
+      type: object
+      description: |
+        Picks which days the schedule fires on. Exactly one of
+        `daily`, `weekly`, `monthly` must be set.
+      properties:
+        daily:
+          type: object
+          description: Fire every day. No knobs.
+        weekly:
+          type: object
+          required: [days]
+          properties:
+            days:
+              type: array
+              minItems: 1
+              items:
+                type: string
+                enum: [mon, tue, wed, thu, fri, sat, sun]
+              example: [mon, wed, fri]
+        monthly:
+          type: object
+          required: [days]
+          properties:
+            days:
+              type: array
+              minItems: 1
+              items:
+                type: integer
+                minimum: 1
+                maximum: 31
+              example: [1, 15]
+
+    Job:
+      type: object
+      required: [job_id, type, status, created_at, updated_at]
+      properties:
+        job_id: { type: string }
+        type: { $ref: '#/components/schemas/JobType' }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        format: { $ref: '#/components/schemas/Format' }
+        zenrows_params:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Stored canonical form — values are always strings even
+            though submit accepts any JSON scalar (see ScraperParams).
+        external_id:
+          type: string
+          description: |
+            Caller-supplied correlation id passed at submit (omitted
+            when the caller did not supply one). Not server-enforced
+            unique.
+        name:
+          type: string
+          description: |
+            Optional human label passed at submit (omitted when the
+            caller did not supply one). Free-form, up to 100 chars.
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        schedule:
+          $ref: '#/components/schemas/JobSchedule'
+          description: |
+            Schedule block — present only for `type: scheduled`
+            jobs.
+        next_scheduled_run:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Server-computed timestamp of the next expected fire,
+            stamped at submit and re-stamped on every fire. `null`
+            for non-scheduled jobs and for one-shot `at(...)`
+            schedules that have already fired. Stays computed when
+            `schedule_state == paused` — "what would fire next if
+            you resumed."
+        schedule_state:
+          $ref: '#/components/schemas/ScheduleState'
+          description: |
+            Set only for `type: scheduled`. Default `active` at
+            submit; flip via `POST /v1/jobs/{id}/schedule/state`.
+        webhook:
+          $ref: '#/components/schemas/WebhookConfig'
+          description: |
+            Webhook delivery config. Present iff a
+            webhook is configured. Mutable via `PUT/DELETE
+            /v1/jobs/{id}/webhook`; `signature` never appears
+            alone — the whole `webhook` key is omitted when no
+            URL is set.
+        latest_run:
+          $ref: '#/components/schemas/Run'
+          description: |
+            Snapshot projection of the latest run. Absent for
+            `scheduled` jobs that haven't fired yet.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ListJobsResponse:
+      type: object
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          items: { $ref: '#/components/schemas/Job' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    ListJobRunsResponse:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/Run' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    TaskResult:
+      type: object
+      required: [task_id, run_id, url, status]
+      properties:
+        task_id: { type: string }
+        external_id:
+          type: string
+          description: |
+            Caller-supplied correlation id from submit/AddTasks.
+            Omitted when the caller did not supply one.
+        run_id: { type: string }
+        url: { type: string, format: uri }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        status: { $ref: '#/components/schemas/TaskStatus' }
+        type: { $ref: '#/components/schemas/ResultType' }
+        result_url:
+          type: string
+          nullable: true
+          description: |
+            2-hour presigned download URL for the result body, or a
+            `/v1/jobs/<id>/runs/<run>/tasks/<tid>/content` URL you can
+            fetch directly. Empty for non-successful tasks.
+        error:
+          $ref: '#/components/schemas/Problem'
+          description: |
+            Present on failed tasks. The scraping engine's error
+            response as Problem JSON, or a synthesised envelope with
+            `code: "gateway_unreachable"` when it couldn't be reached.
+        source_run_id:
+          type: string
+          description: |
+            Set when this row was copied from another run by
+            `/rerun?status=`. The row is terminal at creation, is
+            never re-executed, and its `result_url` resolves to the
+            source run's stored result. On chained retries,
+            `source_run_id` chases back to the run that actually
+            owns the result. Empty for normally-executed rows.
+        spend: { $ref: '#/components/schemas/TaskSpend' }
+
+    ListResultsResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items: { $ref: '#/components/schemas/TaskResult' }
+        next_cursor:
+          type: string
+          nullable: true
+
+    TaskHistoryEvent:
+      type: object
+      required: [started_at, ended_at, attempt]
+      properties:
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+        attempt:
+          type: integer
+          minimum: 1
+          description: 1-indexed attempt within the run.
+        error:
+          $ref: '#/components/schemas/Problem'
+        spend:
+          allOf: [{ $ref: '#/components/schemas/Spend' }]
+          description: |
+            Indicative spend charged for this single attempt. Zero
+            on attempts that didn't reach the scraping engine or
+            were not charged.
+
+    TaskHistoryResponse:
+      type: object
+      required: [events]
+      properties:
+        events:
+          type: array
+          items: { $ref: '#/components/schemas/TaskHistoryEvent' }
+
+    WebhookConfig:
+      type: object
+      required: [url, signature]
+      description: |
+        Webhook delivery config for `run.completed` / `run.failed`. Returned on
+        `GET /v1/jobs/{id}` (inline under `webhook`) and on
+        `GET /v1/jobs/{id}/webhook`. `PUT` requires both fields —
+        no defaulting at the mutate boundary (otherwise toggling
+        `url` would silently disable signing). Submit body accepts
+        the same shape with `signature` optional (defaults `false`).
+      properties:
+        url:
+          type: string
+          format: uri
+          description: |
+            HTTPS only. Host must resolve via DNS within 1 second
+            (1+ A/AAAA record).
+        signature:
+          type: boolean
+          description: |
+            Opt-in HMAC signing. When `true`, each delivery is signed
+            with the org's active HMAC key
+            (`POST /v1/hmac/keys/rotate`) and carries
+            `X-Signature: t=<unix>,v1=<hex>,kid=<active>`. The signed
+            input is `t + "." + raw_body`, HMAC-SHA256. When `false`,
+            deliveries carry **no** `X-Signature` header — header
+            absence is the signal.
+
+    TestWebhookRequest:
+      type: object
+      required: [url]
+      description: |
+        Body for `POST /v1/webhook/test`. Same shape as the submit-time
+        `webhook` field; `signature` is optional and defaults `false`.
+      properties:
+        url:
+          type: string
+          format: uri
+          description: |
+            HTTPS only. Host must resolve via DNS within 1 second.
+            Identical validation to the submit/PUT webhook URL.
+        signature:
+          type: boolean
+          default: false
+          description: |
+            When `true`, the test event is signed with the org's
+            active HMAC key — same `X-Signature: t,v1,kid` header
+            real deliveries use. Returns `400
+            webhook_signing_requires_active_key` when no active key
+            exists.
+
+    TestWebhookResponse:
+      type: object
+      required: [delivered, event_id, elapsed_ms]
+      description: |
+        Outcome of the synthetic test dispatch. HTTP status is always
+        `200` when the request was validated — the receiver outcome
+        is in the body. The synthetic envelope uses `event_type:
+        "webhook.test"` and stable sentinel IDs (`job_id`/`run_id` =
+        `"test"`) so receivers can recognise and discard test traffic.
+      properties:
+        delivered:
+          type: boolean
+          description: |
+            `true` iff the receiver responded with a 2xx status. `false`
+            on non-2xx, timeout, or transport error.
+        event_id:
+          type: string
+          description: |
+            ULID of the synthetic event. Different on every call so
+            receivers' dedup tables don't suppress repeated tests.
+        status_code:
+          type: integer
+          description: |
+            HTTP status returned by the receiver. Absent on timeout or
+            transport error (no response was received).
+        error:
+          type: string
+          description: |
+            Human-readable reason when `delivered: false`. Same
+            vocabulary as real webhook deliveries
+            (`http_4xx:<code>`, `http_5xx:<code>`, `timeout`,
+            `transport_error:<detail>`). Absent on success.
+        elapsed_ms:
+          type: integer
+          description: Wall-clock duration of the receiver POST in milliseconds.
+
+    FileInputColumnRef:
+      description: |
+        Either a column name (string) — requires `csv.header: true` —
+        or a 0-based column index (integer). Other shapes are
+        rejected at create-time.
+      oneOf:
+        - type: string
+          minLength: 1
+        - type: integer
+          minimum: 0
+
+    CreateJobInputRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [csv]
+          description: Only `csv` is supported in v1.
+        csv:
+          type: object
+          required: [fields]
+          properties:
+            delimiter:
+              type: string
+              minLength: 1
+              maxLength: 1
+              default: ","
+              description: Single-character field delimiter.
+            quote:
+              type: string
+              minLength: 1
+              maxLength: 1
+              default: "\""
+              description: Single-character quoting character.
+            header:
+              type: boolean
+              default: false
+              description: |
+                When true, the first CSV row is consumed as a header
+                row and `csv.fields.*` values may be column names.
+            fields:
+              type: object
+              required: [url]
+              properties:
+                url: { $ref: '#/components/schemas/FileInputColumnRef' }
+                external_id: { $ref: '#/components/schemas/FileInputColumnRef' }
+              additionalProperties: false
+              description: |
+                Map from canonical task field → CSV column. Only
+                `url` (required) and `external_id` (optional) are
+                accepted. Each value is a column index (int) or a
+                column name (string, requires `header: true`).
+
+    FileInputUploadTarget:
+      type: object
+      required: [method, url, expires_at]
+      properties:
+        method:
+          type: string
+          enum: [PUT]
+        url:
+          type: string
+          format: uri
+          description: |
+            Presigned PUT URL. Caller MUST send the body with the
+            exact `Content-Type` shown in `headers` — the signature
+            binds the content-type.
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          example: { "Content-Type": "text/csv" }
+        expires_at:
+          type: string
+          format: date-time
+          description: PUT URL TTL (~30 min).
+
+    CreateJobInputResponse:
+      type: object
+      required: [file_input_id, upload, expires_at]
+      properties:
+        file_input_id: { type: string }
+        upload: { $ref: '#/components/schemas/FileInputUploadTarget' }
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            24 h slot lifetime — beyond this the slot and its uploaded
+            body are removed and the `file_input_id` returns 404.
+
+    HMACKeyMeta:
+      type: object
+      required: [kid, created_at]
+      description: |
+        Public view of one HMAC key — id + creation time. Never
+        includes secret material; that's only returned at /rotate.
+      properties:
+        kid:
+          type: string
+          description: ULID identifying this key. Stable for the
+            life of the slot; a new candidate gets a new kid.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        created_at: { type: string, format: date-time }
+
+    HMACKeyList:
+      type: object
+      description: Slots populated at the time of the call.
+      properties:
+        active:    { $ref: '#/components/schemas/HMACKeyMeta' }
+        candidate: { $ref: '#/components/schemas/HMACKeyMeta' }
+
+    HMACKeyCreated:
+      type: object
+      required: [kid, secret, created_at]
+      description: |
+        Response to `/rotate`. `secret` is base64-encoded raw key
+        material. **This is the ONLY response that ever contains
+        the secret value** — capture it now or generate a new one
+        via another /rotate call.
+      properties:
+        kid:        { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+        secret:     { type: string, description: "Base64-encoded 32-byte HMAC key." }
+        created_at: { type: string, format: date-time }
+
+    HMACKeyFinalized:
+      type: object
+      required: [active_kid, created_at]
+      description: Response to `/rotate/finalize`. No secret.
+      properties:
+        active_kid: { type: string, pattern: '^[0-9A-HJKMNP-TV-Z]{26}$' }
+        created_at: { type: string, format: date-time }
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 Problem Details.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        instance: { type: string }
+        invalid_tasks:
+          type: array
+          description: Present on validation errors.
+          items:
+            type: object
+            required: [index, reason]
+            properties:
+              index: { type: integer }
+              reason:
+                type: string
+                enum:
+                  - malformed_url
+                  - unsupported_scheme
+                  - missing_host
+                  - url_too_long
+                  - metadata_too_large
+                  - metadata_key_invalid
+                  - invalid_external_id
+                  - unknown_param
+                  - invalid_param_value
+              value:
+                type: string
+                description: |
+                  Offending input. For URL / metadata reasons this is
+                  a redacted/truncated form of the bad value. For
+                  `unknown_param` / `invalid_param_value` this is the
+                  param key.
+      additionalProperties: true
+
+    ExportStatus:
+      type: string
+      enum: [pending, running, completed, failed]
+      description: |
+        Lifecycle state of a results export.
+        * `pending` — export accepted, not started yet.
+        * `running` — the zip is being produced.
+        * `completed` — `download_url` will be present.
+        * `failed`   — `error` carries the reason.
+
+    StartExportResponse:
+      type: object
+      required: [export_id, status, created_at, expires_at]
+      description: Returned by `startResultsExport`.
+      properties:
+        export_id:
+          type: string
+          description: ULID identifying this export. Use it for `getResultsExport`.
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        status:
+          $ref: '#/components/schemas/ExportStatus'
+        created_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            12 h after `created_at`. Past this point the export and
+            its download are removed and the export id 404s.
+
+    Export:
+      type: object
+      required: [export_id, status, created_at, expires_at]
+      description: |
+        Polled view of a results export. `download_url` is presigned
+        fresh on every successful poll — stash the metadata, but
+        re-fetch the URL right before you download.
+      properties:
+        export_id:
+          type: string
+          pattern: '^[0-9A-HJKMNP-TV-Z]{26}$'
+        status:
+          $ref: '#/components/schemas/ExportStatus'
+        error:
+          type: string
+          nullable: true
+          description: |
+            Non-empty only when `status = failed`. Stable strings —
+            e.g. `"results are larger then 1 gb"` when the combined
+            results exceed the 1 GiB cap.
+        download_url:
+          type: string
+          format: uri
+          description: |
+            Presigned download URL for the zipped run results.
+            Present only when `status = completed`. Short-lived — the
+            server mints a new one on every poll.
+        created_at: { type: string, format: date-time }
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            12 h after `created_at`. The download is unavailable
+            after this point.
