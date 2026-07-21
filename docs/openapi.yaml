@@ -422,6 +422,12 @@ paths:
         - Auto-closes an `open` job (existing behavior).
         - Honors `Idempotency-Key`: a repeat call with the same
           key returns the original new-run id.
+
+        Large reruns are accepted asynchronously: past a server-side
+        row-count threshold (the same one that upgrades large
+        submissions) the call returns `202` and the new run's task
+        rows stream into storage off the request path. Treat `201`
+        and `202` both as success.
       parameters:
         - in: query
           name: status
@@ -437,7 +443,20 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '201':
-          description: New run created.
+          description: New run created (sync path). All task rows are written.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RerunJobResponse' }
+        '202':
+          description: |
+            New run accepted (large rerun). `retried_tasks` /
+            `inherited_tasks` are the final counts, but individual
+            task rows stream into storage off the request path.
+            `latest_run.ingest_status` is `pending` in this response
+            and flips to `done` on `GET /v1/jobs/{id}` once every
+            task row is visible; the run's `stats.total` is correct
+            from this response forward, so completion polling is
+            safe. Body shape matches the 201 response.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RerunJobResponse' }
@@ -1246,11 +1265,24 @@ components:
         `session_id`, `original_status`, `allowed_status_codes`,
         `wait_for`, `wait`, `block_resources`, `json_response`,
         `css_extractor`, `autoparse`, `response_type`, `outputs`.
+
+        `custom_headers` additionally accepts an object of header
+        name → value pairs (or that object serialised as a JSON
+        string), e.g. `{"custom_headers": {"Referer":
+        "https://www.google.com/"}}`. The headers are forwarded to
+        the scraping target, subject to the scraper API's usual
+        header sanitisation. At most 32 headers / 8 KB serialised;
+        names must be valid HTTP tokens. Header filtering and
+        browser-header sanitisation are owned by the scraper API,
+        not Conveyor. A task-level
+        `custom_headers` replaces the job-level object wholesale —
+        no per-name merging.
       additionalProperties:
         oneOf:
           - { type: string }
           - { type: boolean }
           - { type: integer }
+          - { type: object, additionalProperties: { type: string } }
 
     TaskInput:
       type: object
@@ -1509,12 +1541,13 @@ components:
           type: string
           enum: [pending, done]
           description: |
-            Present only on runs created by a large (202) submission.
-            `pending` — task rows are still streaming into storage;
-            reads may return partial pages and `addTasks` returns
-            `409`. `done` — every accepted task row is visible.
-            Omitted on runs whose tasks were written on the request
-            path (201 submissions, `addTasks` batches, reruns).
+            Present only on runs created by a large (202) submission
+            or a large (202) rerun. `pending` — task rows are still
+            streaming into storage; reads may return partial pages
+            and `addTasks` returns `409`. `done` — every accepted
+            task row is visible. Omitted on runs whose tasks were
+            written on the request path (201 submissions and
+            reruns, `addTasks` batches).
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         failure_reason:
@@ -1731,7 +1764,7 @@ components:
           type: string
           nullable: true
           description: |
-            2-hour presigned download URL for the result body, or a
+            24-hour presigned download URL for the result body, or a
             `/v1/jobs/<id>/runs/<run>/tasks/<tid>/content` URL you can
             fetch directly. Empty for non-successful tasks.
         error:

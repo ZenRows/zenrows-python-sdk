@@ -46,7 +46,7 @@ from zenrows.batch._download import (
     download_to_dir,
     download_to_memory,
 )
-from zenrows.batch._estimate import CostEstimate, _estimate_cost
+from zenrows.batch._estimate import CostEstimate, ParamMap, _estimate_cost
 from zenrows.batch._resources import (
     ExportHandle,
     ExportRef,
@@ -236,7 +236,7 @@ class ZenRowsBatchClient:
         urls: list[str | TaskInputDict] | None = None,
         *,
         file_input_id: str | None = None,
-        zenrows_params: dict[str, str] | None = None,
+        zenrows_params: ParamMap | None = None,
         external_id: str | None = None,
         name: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -279,7 +279,7 @@ class ZenRowsBatchClient:
         self,
         urls: list[str | TaskInputDict] | None = None,
         *,
-        zenrows_params: dict[str, str] | None = None,
+        zenrows_params: ParamMap | None = None,
         external_id: str | None = None,
         name: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -319,7 +319,7 @@ class ZenRowsBatchClient:
         urls: list[str | TaskInputDict] | None = None,
         *,
         file_input_id: str | None = None,
-        zenrows_params: dict[str, str] | None = None,
+        zenrows_params: ParamMap | None = None,
         external_id: str | None = None,
         name: str | None = None,
         metadata: dict[str, str] | None = None,
@@ -1156,7 +1156,7 @@ def _build_submit_body(
     urls: list[str | TaskInputDict] | None,
     file_input_id: str | None,
     status: Literal["open", "closed"],
-    zenrows_params: dict[str, str] | None,
+    zenrows_params: ParamMap | None,
     schedule: JobScheduleDict | None = None,
     external_id: str | None = None,
     name: str | None = None,
