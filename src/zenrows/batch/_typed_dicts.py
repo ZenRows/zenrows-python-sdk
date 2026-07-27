@@ -32,6 +32,13 @@ class TaskInputDict(TypedDict, total=False):
     url: str
     external_id: NotRequired[str]
     metadata: NotRequired[dict[str, str]]
+    # HTTP method against `url`: "GET" (default) | "POST". POST is for
+    # safe/idempotent requests only — tasks are retried, so the target
+    # may see the same POST more than once.
+    method: NotRequired[str]
+    # Request body, POST only. Any JSON value: object/array/number/bool
+    # → application/json; a str is sent verbatim as form-urlencoded.
+    body: NotRequired[Any]
     zenrows_params: NotRequired[dict[str, Any]]
 
 
