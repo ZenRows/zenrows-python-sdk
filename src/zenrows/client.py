@@ -77,6 +77,18 @@ class ZenRowsClient:
 
     # ---- sync HTTP verbs ----
 
+    def fetch(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Fetch a URL through ZenRows — the main page-scraping product. This is
+        the primary entry point; `get()` remains as a deprecated alias.
+        """
+        return self._worker("GET", url, params, headers, **kwargs)
+
     def get(
         self,
         url: str,
@@ -84,7 +96,25 @@ class ZenRowsClient:
         headers: dict | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        return self._worker("GET", url, params, headers, **kwargs)
+        """Deprecated: use `fetch()` instead. Kept for backward compatibility."""
+        return self.fetch(url, params, headers, **kwargs)
+
+    def extract(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        mode: str = "auto",
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Fetch a URL and run it through Extract — ZenRows' AI-powered structured
+        extraction (private beta). `mode` is one of "auto" (default), "native",
+        or "standard". Thin wrapper over `fetch()` with the `extract` param set —
+        no separate endpoint or auth.
+        """
+        final_params = dict(params) if params else {}
+        final_params["extract"] = mode
+        return self.fetch(url, final_params, headers, **kwargs)
 
     def post(
         self,
@@ -108,7 +138,7 @@ class ZenRowsClient:
 
     # ---- async-flavoured wrappers (thread-pool offload) ----
 
-    async def get_async(
+    async def fetch_async(
         self,
         url: str,
         params: dict | None = None,
@@ -116,6 +146,28 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         return await self._offload("GET", url, params, headers, **kwargs)
+
+    async def get_async(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Deprecated: use `fetch_async()` instead. Kept for backward compatibility."""
+        return await self.fetch_async(url, params, headers, **kwargs)
+
+    async def extract_async(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        mode: str = "auto",
+        **kwargs: Any,
+    ) -> requests.Response:
+        final_params = dict(params) if params else {}
+        final_params["extract"] = mode
+        return await self.fetch_async(url, final_params, headers, **kwargs)
 
     async def post_async(
         self,

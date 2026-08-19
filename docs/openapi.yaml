@@ -1270,10 +1270,10 @@ components:
         name → value pairs (or that object serialised as a JSON
         string), e.g. `{"custom_headers": {"Referer":
         "https://www.google.com/"}}`. The headers are forwarded to
-        the scraping target, subject to the scraper API's usual
+        the scraping target, subject to Fetch's usual
         header sanitisation. At most 32 headers / 8 KB serialised;
         names must be valid HTTP tokens. Header filtering and
-        browser-header sanitisation are owned by the scraper API,
+        browser-header sanitisation are owned by Fetch,
         not Conveyor. A task-level
         `custom_headers` replaces the job-level object wholesale —
         no per-name merging.

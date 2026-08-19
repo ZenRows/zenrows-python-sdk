@@ -1,3 +1,10 @@
+<p align="center">
+    <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo/dark.svg"/>
+        <img alt="ZenRows Logo" src=".github/assets/logo/light.svg" width="300" />
+    </picture>
+</p>
+
 # ZenRows Python SDK
 
 SDK to access [ZenRows](https://www.zenrows.com/) APIs directly from Python.
@@ -25,13 +32,15 @@ The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. Th
 
 It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 429, 500, 502, 503, and 504). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
 
+`client.fetch()` is the primary method for the main page-scraping product; `client.get()` still works and is kept as a deprecated alias.
+
 ```python
 from zenrows import ZenRowsClient
 
 client = ZenRowsClient("YOUR-API-KEY", retries=1)
 url = "https://www.zenrows.com/"
 
-response = client.get(url, params={
+response = client.fetch(url, params={
     # Our algorithm allows to automatically extract content from any website
     "autoparse": False,
 
@@ -117,7 +126,7 @@ print(response.text)
 
 To limit the concurrency, it uses [asyncio](https://docs.python.org/3/library/asyncio.html), which will simultaneously send a maximum of requests. The concurrency is determined by the plan you are in, so take a look at the [pricing](https://www.zenrows.com/pricing) and set it accordingly. Take into account that each client instance will have its own limit, meaning that two different scripts will not share it, and 429 (Too Many Requests) errors might arise.
 
-The main difference with the sequential snippet above is `client.get_async` instead of `client.get`. The rest will work exactly the same, and we will support the `get` function. But the async is necessary to parallelize calls and allow async/await syntax. Remember to run the scripts with `asyncio.run` or it will fail with a `coroutine 'main' was never awaited` error.
+The main difference with the sequential snippet above is `client.fetch_async` instead of `client.fetch`. The rest will work exactly the same. But the async is necessary to parallelize calls and allow async/await syntax. Remember to run the scripts with `asyncio.run` or it will fail with a `coroutine 'main' was never awaited` error.
 
 We use `asyncio.gather` in the example below. It will wait for all the calls to finish, and the results are stored in a `responses` array. The whole list of URLs will run, even if some fail. Then each response will have the status, request, response content, and other values as usual.
 
@@ -132,12 +141,28 @@ async def main():
         "https://www.zenrows.com/",
         # ...
     ]
-    responses = await asyncio.gather(*[client.get_async(url) for url in urls])
+    responses = await asyncio.gather(*[client.fetch_async(url) for url in urls])
 
     for response in responses:
         print(response.text)
 
 asyncio.run(main())
+```
+
+### Extract
+
+[Extract](https://docs.zenrows.com) (private beta) runs a page through ZenRows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
+
+```python
+from zenrows import ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY")
+url = "https://www.zenrows.com/"
+
+response = client.extract(url)  # extract: "auto"
+# response = client.extract(url, mode="native")
+
+print(response.json())
 ```
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
