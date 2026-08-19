@@ -1,4 +1,4 @@
-"""Synchronous ZenRows scraper client (the original SDK surface).
+"""Synchronous Zenrows scraper client (the original SDK surface).
 
 Backward-compatible with the pre-1.4 API: the constructor still takes
 `(apikey, retries, concurrency)` positionally, and `get`/`post`/`put`
@@ -33,7 +33,7 @@ _RETRY_STATUSES = [422, 429, 500, 502, 503, 504]
 
 
 class ZenRowsClient:
-    """Synchronous client for the ZenRows scraping API.
+    """Synchronous client for the Zenrows scraping API.
 
     Example:
 
@@ -84,7 +84,7 @@ class ZenRowsClient:
         headers: dict | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        """Fetch a URL through ZenRows — the main page-scraping product. This is
+        """Fetch a URL through Zenrows — the main page-scraping product. This is
         the primary entry point; `get()` remains as a deprecated alias.
         """
         return self._worker("GET", url, params, headers, **kwargs)
@@ -107,7 +107,7 @@ class ZenRowsClient:
         mode: str = "auto",
         **kwargs: Any,
     ) -> requests.Response:
-        """Fetch a URL and run it through Extract — ZenRows' AI-powered structured
+        """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
         extraction (private beta). `mode` is one of "auto" (default), "native",
         or "standard". Thin wrapper over `fetch()` with the `extract` param set —
         no separate endpoint or auth.

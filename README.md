@@ -1,14 +1,14 @@
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo/dark.svg"/>
-        <img alt="ZenRows Logo" src=".github/assets/logo/light.svg" width="300" />
+        <img alt="Zenrows Logo" src=".github/assets/logo/light.svg" width="300" />
     </picture>
 </p>
 
-# ZenRows Python SDK
+# Zenrows Python SDK
 
-SDK to access [ZenRows](https://www.zenrows.com/) APIs directly from Python.
-ZenRows handles proxies rotation, headless browsers, and CAPTCHAs for you.
+SDK to access [Zenrows](https://www.zenrows.com/) APIs directly from Python.
+Zenrows handles proxies rotation, headless browsers, and CAPTCHAs for you.
 
 This package ships two clients:
 
@@ -151,7 +151,7 @@ asyncio.run(main())
 
 ### Extract
 
-[Extract](https://docs.zenrows.com) (private beta) runs a page through ZenRows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
+[Extract](https://docs.zenrows.com) (private beta) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
 
 ```python
 from zenrows import ZenRowsClient
@@ -174,7 +174,7 @@ print(response.json())
 
 For workflows where you have many URLs to scrape and don't want to
 manage retries, concurrency, and pagination yourself, the Batch API
-submits a *job* (a list of tasks), runs it asynchronously on ZenRows'
+submits a *job* (a list of tasks), runs it asynchronously on Zenrows'
 infrastructure, and lets you poll results when they're ready.
 
 ```python
