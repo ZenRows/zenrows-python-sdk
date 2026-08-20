@@ -42,6 +42,42 @@ class TestZenRowsClient(TestCase):
         )
 
     @mock.patch.object(Session, "request")
+    def test_fetch_is_the_primary_method_get_is_a_deprecated_alias(self, mock_request):
+        self.zenrows_client.fetch(url)
+
+        mock_request.assert_called_once_with(
+            "GET",
+            api_url_base,
+            params={"url": url, "apikey": apikey},
+            headers=default_headers,
+            data=None,
+        )
+
+    @mock.patch.object(Session, "request")
+    def test_extract_sets_the_extract_param_defaulting_to_auto(self, mock_request):
+        self.zenrows_client.extract(url)
+
+        mock_request.assert_called_once_with(
+            "GET",
+            api_url_base,
+            params={"url": url, "apikey": apikey, "extract": "auto"},
+            headers=default_headers,
+            data=None,
+        )
+
+    @mock.patch.object(Session, "request")
+    def test_extract_accepts_an_explicit_mode(self, mock_request):
+        self.zenrows_client.extract(url, mode="native")
+
+        mock_request.assert_called_once_with(
+            "GET",
+            api_url_base,
+            params={"url": url, "apikey": apikey, "extract": "native"},
+            headers=default_headers,
+            data=None,
+        )
+
+    @mock.patch.object(Session, "request")
     def test_get_with_headers(self, mock_request):
         self.zenrows_client.get(url, headers={"Referrer": "https://www.google.com"})
 

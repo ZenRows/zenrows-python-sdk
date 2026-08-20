@@ -1,4 +1,4 @@
-"""Synchronous ZenRows scraper client (the original SDK surface).
+"""Synchronous Zenrows scraper client (the original SDK surface).
 
 Backward-compatible with the pre-1.4 API: the constructor still takes
 `(apikey, retries, concurrency)` positionally, and `get`/`post`/`put`
@@ -32,8 +32,19 @@ DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 _RETRY_STATUSES = [422, 429, 500, 502, 503, 504]
 
 
+def _is_auth010(response: requests.Response) -> bool:
+    """True when a response's JSON error envelope carries the Extract
+    domain-not-enabled code (AUTH010)."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    code = body.get("code") if isinstance(body, dict) else None
+    return isinstance(code, str) and code.upper() == "AUTH010"
+
+
 class ZenRowsClient:
-    """Synchronous client for the ZenRows scraping API.
+    """Synchronous client for the Zenrows scraping API.
 
     Example:
 
@@ -77,6 +88,18 @@ class ZenRowsClient:
 
     # ---- sync HTTP verbs ----
 
+    def fetch(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Fetch a URL through Zenrows — the main page-scraping product. This is
+        the primary entry point; `get()` remains as a deprecated alias.
+        """
+        return self._worker("GET", url, params, headers, **kwargs)
+
     def get(
         self,
         url: str,
@@ -84,7 +107,44 @@ class ZenRowsClient:
         headers: dict | None = None,
         **kwargs: Any,
     ) -> requests.Response:
-        return self._worker("GET", url, params, headers, **kwargs)
+        """Deprecated: use `fetch()` instead. Kept for backward compatibility."""
+        return self.fetch(url, params, headers, **kwargs)
+
+    def extract(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        mode: str = "auto",
+        fallback_to_autoparse: bool = True,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
+        extraction (beta). `mode` is one of "auto" (default), "native",
+        or "standard". Thin wrapper over `fetch()` with the `extract` param set —
+        no separate endpoint or auth.
+
+        `mode="auto"` is a domain-gated open beta: when the target domain isn't
+        enabled yet, the API returns a 402 with `code: "AUTH010"`. By default
+        this retries once with `autoparse=True` instead of returning the error
+        response — pass `fallback_to_autoparse=False` to disable that and get
+        the raw AUTH010 response back.
+        """
+        final_params = dict(params) if params else {}
+        final_params["extract"] = mode
+        response = self.fetch(url, final_params, headers, **kwargs)
+
+        if (
+            response.status_code == 402
+            and mode == "auto"
+            and fallback_to_autoparse
+            and _is_auth010(response)
+        ):
+            autoparse_params = dict(params) if params else {}
+            autoparse_params["autoparse"] = True
+            return self.fetch(url, autoparse_params, headers, **kwargs)
+
+        return response
 
     def post(
         self,
@@ -108,7 +168,7 @@ class ZenRowsClient:
 
     # ---- async-flavoured wrappers (thread-pool offload) ----
 
-    async def get_async(
+    async def fetch_async(
         self,
         url: str,
         params: dict | None = None,
@@ -116,6 +176,43 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         return await self._offload("GET", url, params, headers, **kwargs)
+
+    async def get_async(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Deprecated: use `fetch_async()` instead. Kept for backward compatibility."""
+        return await self.fetch_async(url, params, headers, **kwargs)
+
+    async def extract_async(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        mode: str = "auto",
+        fallback_to_autoparse: bool = True,
+        **kwargs: Any,
+    ) -> requests.Response:
+        """Async counterpart of `extract()` - see its docstring for the
+        AUTH010 -> Autoparse fallback behavior and `fallback_to_autoparse`."""
+        final_params = dict(params) if params else {}
+        final_params["extract"] = mode
+        response = await self.fetch_async(url, final_params, headers, **kwargs)
+
+        if (
+            response.status_code == 402
+            and mode == "auto"
+            and fallback_to_autoparse
+            and _is_auth010(response)
+        ):
+            autoparse_params = dict(params) if params else {}
+            autoparse_params["autoparse"] = True
+            return await self.fetch_async(url, autoparse_params, headers, **kwargs)
+
+        return response
 
     async def post_async(
         self,
