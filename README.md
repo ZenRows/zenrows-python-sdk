@@ -151,7 +151,7 @@ asyncio.run(main())
 
 ### Extract
 
-[Extract](https://docs.zenrows.com) (private beta) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
+[Extract](https://docs.zenrows.com) (beta) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
 
 ```python
 from zenrows import ZenRowsClient
@@ -167,10 +167,9 @@ print(response.json())
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
 
-> **⚠️ Private beta.** The Batch API is currently in private beta and not
-> yet generally available. If you'd like access, please
-> [contact support](mailto:support@zenrows.com) to have it enabled for
-> your account.
+> **⚠️ Beta.** The Batch API is currently in beta and not yet generally
+> available — free to use while it's in beta, but the shape of the API may
+> still change before GA.
 
 For workflows where you have many URLs to scrape and don't want to
 manage retries, concurrency, and pagination yourself, the Batch API

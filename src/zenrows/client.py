@@ -120,7 +120,7 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
-        extraction (private beta). `mode` is one of "auto" (default), "native",
+        extraction (beta). `mode` is one of "auto" (default), "native",
         or "standard". Thin wrapper over `fetch()` with the `extract` param set —
         no separate endpoint or auth.
 
