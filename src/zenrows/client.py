@@ -32,6 +32,17 @@ DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 _RETRY_STATUSES = [422, 429, 500, 502, 503, 504]
 
 
+def _is_auth010(response: requests.Response) -> bool:
+    """True when a response's JSON error envelope carries the Extract
+    domain-not-enabled code (AUTH010)."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    code = body.get("code") if isinstance(body, dict) else None
+    return isinstance(code, str) and code.upper() == "AUTH010"
+
+
 class ZenRowsClient:
     """Synchronous client for the Zenrows scraping API.
 
@@ -105,16 +116,35 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
+        fallback_to_autoparse: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
         """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
         extraction (private beta). `mode` is one of "auto" (default), "native",
         or "standard". Thin wrapper over `fetch()` with the `extract` param set —
         no separate endpoint or auth.
+
+        `mode="auto"` is a domain-gated open beta: when the target domain isn't
+        enabled yet, the API returns a 402 with `code: "AUTH010"`. By default
+        this retries once with `autoparse=True` instead of returning the error
+        response — pass `fallback_to_autoparse=False` to disable that and get
+        the raw AUTH010 response back.
         """
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
-        return self.fetch(url, final_params, headers, **kwargs)
+        response = self.fetch(url, final_params, headers, **kwargs)
+
+        if (
+            response.status_code == 402
+            and mode == "auto"
+            and fallback_to_autoparse
+            and _is_auth010(response)
+        ):
+            autoparse_params = dict(params) if params else {}
+            autoparse_params["autoparse"] = True
+            return self.fetch(url, autoparse_params, headers, **kwargs)
+
+        return response
 
     def post(
         self,
@@ -163,11 +193,26 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
+        fallback_to_autoparse: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
+        """Async counterpart of `extract()` - see its docstring for the
+        AUTH010 -> Autoparse fallback behavior and `fallback_to_autoparse`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
-        return await self.fetch_async(url, final_params, headers, **kwargs)
+        response = await self.fetch_async(url, final_params, headers, **kwargs)
+
+        if (
+            response.status_code == 402
+            and mode == "auto"
+            and fallback_to_autoparse
+            and _is_auth010(response)
+        ):
+            autoparse_params = dict(params) if params else {}
+            autoparse_params["autoparse"] = True
+            return await self.fetch_async(url, autoparse_params, headers, **kwargs)
+
+        return response
 
     async def post_async(
         self,
