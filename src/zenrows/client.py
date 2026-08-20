@@ -117,6 +117,7 @@ class ZenRowsClient:
         headers: dict | None = None,
         mode: str = "auto",
         fallback_to_autoparse: bool = True,
+        adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
         """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
@@ -129,9 +130,19 @@ class ZenRowsClient:
         this retries once with `autoparse=True` instead of returning the error
         response — pass `fallback_to_autoparse=False` to disable that and get
         the raw AUTH010 response back.
+
+        `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
+        (`mode: "auto"` at the wire-param level - unrelated to this method's own
+        `mode` argument) on both the extract attempt and the Autoparse fallback,
+        so a target needing `js_render`/`premium_proxy` gets escalated
+        automatically instead of failing with REQS002. Pass
+        `adaptive_stealth=False` to disable that and set `js_render`/
+        `premium_proxy` yourself.
         """
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
+        if adaptive_stealth:
+            final_params["mode"] = "auto"
         response = self.fetch(url, final_params, headers, **kwargs)
 
         if (
@@ -142,6 +153,8 @@ class ZenRowsClient:
         ):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
+            if adaptive_stealth:
+                autoparse_params["mode"] = "auto"
             return self.fetch(url, autoparse_params, headers, **kwargs)
 
         return response
@@ -194,12 +207,16 @@ class ZenRowsClient:
         headers: dict | None = None,
         mode: str = "auto",
         fallback_to_autoparse: bool = True,
+        adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        AUTH010 -> Autoparse fallback behavior and `fallback_to_autoparse`."""
+        AUTH010 -> Autoparse fallback behavior, `fallback_to_autoparse`, and
+        `adaptive_stealth`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
+        if adaptive_stealth:
+            final_params["mode"] = "auto"
         response = await self.fetch_async(url, final_params, headers, **kwargs)
 
         if (
@@ -210,6 +227,8 @@ class ZenRowsClient:
         ):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
+            if adaptive_stealth:
+                autoparse_params["mode"] = "auto"
             return await self.fetch_async(url, autoparse_params, headers, **kwargs)
 
         return response

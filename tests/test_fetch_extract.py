@@ -102,7 +102,13 @@ class TestFetchExtractErrorHandling(TestCase):
         _, kwargs = mock_request.call_args
         self.assertEqual(
             kwargs["params"],
-            {"url": url, "apikey": apikey, "js_render": True, "extract": "native"},
+            {
+                "url": url,
+                "apikey": apikey,
+                "js_render": True,
+                "extract": "native",
+                "mode": "auto",
+            },
         )
 
     @mock.patch.object(Session, "request")
@@ -186,6 +192,45 @@ class TestExtractAutoparseFallback(TestCase):
         self.client.extract(url, params=caller_params)
 
         self.assertEqual(caller_params, {"js_render": True})
+
+
+class TestExtractAdaptiveStealth(TestCase):
+    """extract() sends Adaptive Stealth Mode (mode="auto" at the wire level) by
+    default, so targets needing js_render/premium_proxy (e.g. Zoopla) escalate
+    automatically instead of failing with REQS002."""
+
+    def setUp(self):
+        self.client = ZenRowsClient(apikey)
+
+    @mock.patch.object(Session, "request")
+    def test_sends_adaptive_stealth_by_default(self, mock_request):
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url)
+
+        _, kwargs = mock_request.call_args
+        self.assertEqual(kwargs["params"]["mode"], "auto")
+
+    @mock.patch.object(Session, "request")
+    def test_omits_wire_mode_when_disabled(self, mock_request):
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url, adaptive_stealth=False)
+
+        _, kwargs = mock_request.call_args
+        self.assertNotIn("mode", kwargs["params"])
+
+    @mock.patch.object(Session, "request")
+    def test_fallback_request_also_carries_adaptive_stealth(self, mock_request):
+        mock_request.side_effect = [
+            _fake_response(402, b'{"code": "AUTH010"}'),
+            _fake_response(200, b"{}"),
+        ]
+
+        self.client.extract(url)
+
+        _, fallback_kwargs = mock_request.call_args
+        self.assertEqual(fallback_kwargs["params"]["mode"], "auto")
 
 
 class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):

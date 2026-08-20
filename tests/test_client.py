@@ -60,7 +60,7 @@ class TestZenRowsClient(TestCase):
         mock_request.assert_called_once_with(
             "GET",
             api_url_base,
-            params={"url": url, "apikey": apikey, "extract": "auto"},
+            params={"url": url, "apikey": apikey, "extract": "auto", "mode": "auto"},
             headers=default_headers,
             data=None,
         )
@@ -72,7 +72,7 @@ class TestZenRowsClient(TestCase):
         mock_request.assert_called_once_with(
             "GET",
             api_url_base,
-            params={"url": url, "apikey": apikey, "extract": "native"},
+            params={"url": url, "apikey": apikey, "extract": "native", "mode": "auto"},
             headers=default_headers,
             data=None,
         )
