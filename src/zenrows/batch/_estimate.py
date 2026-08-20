@@ -50,7 +50,7 @@ AUTO_MAX_CREDITS = 25
 _TRUTHY = frozenset({"true", "1", "yes", "on"})
 
 # What `Tier` keys can appear, in the order a breakdown should render.
-ParamValue = str | bool | int
+ParamValue = str | bool | int | dict[str, str]  # dict form: `custom_headers` map
 ParamMap = dict[str, ParamValue]
 TaskLike = str | TaskInput | dict
 

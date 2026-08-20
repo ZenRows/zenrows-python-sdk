@@ -108,7 +108,7 @@ for anyway.
 def submit_regular(urls: list[str | TaskInputDict] | None = None,
                    *,
                    file_input_id: str | None = None,
-                   zenrows_params: dict[str, str] | None = None,
+                   zenrows_params: ParamMap | None = None,
                    external_id: str | None = None,
                    name: str | None = None,
                    metadata: dict[str, str] | None = None,
@@ -140,7 +140,7 @@ open-and-extend pattern see `submit_open`.
 ```python
 def submit_open(urls: list[str | TaskInputDict] | None = None,
                 *,
-                zenrows_params: dict[str, str] | None = None,
+                zenrows_params: ParamMap | None = None,
                 external_id: str | None = None,
                 name: str | None = None,
                 metadata: dict[str, str] | None = None,
@@ -169,7 +169,7 @@ def submit_scheduled(schedule: Schedule | JobScheduleDict,
                      urls: list[str | TaskInputDict] | None = None,
                      *,
                      file_input_id: str | None = None,
-                     zenrows_params: dict[str, str] | None = None,
+                     zenrows_params: ParamMap | None = None,
                      external_id: str | None = None,
                      name: str | None = None,
                      metadata: dict[str, str] | None = None,
@@ -1597,6 +1597,12 @@ exactly one tier. If a malformed param map carries both, `auto`
 wins here (it's what the engine would honor) — but the server would
 reject that body at submit anyway.
 
+<a id="ParamValue"></a>
+
+#### ParamValue
+
+dict form: `custom_headers` map
+
 <a id="Tier"></a>
 
 ## Tier Objects
@@ -2132,12 +2138,13 @@ rows). Flip via `POST /jobs/{id}/pause` and
 class IngestStatus(Enum)
 ```
 
-Present only on runs created by a large (202) submission.
-`pending` — task rows are still streaming into storage;
-reads may return partial pages and `addTasks` returns
-`409`. `done` — every accepted task row is visible.
-Omitted on runs whose tasks were written on the request
-path (201 submissions, `addTasks` batches, reruns).
+Present only on runs created by a large (202) submission
+or a large (202) rerun. `pending` — task rows are still
+streaming into storage; reads may return partial pages
+and `addTasks` returns `409`. `done` — every accepted
+task row is visible. Omitted on runs whose tasks were
+written on the request path (201 submissions and
+reruns, `addTasks` batches).
 
 <a id="FailureReason"></a>
 
@@ -2182,12 +2189,13 @@ rows). Flip via `POST /jobs/{id}/pause` and
 
 #### ingest\_status
 
-Present only on runs created by a large (202) submission.
-`pending` — task rows are still streaming into storage;
-reads may return partial pages and `addTasks` returns
-`409`. `done` — every accepted task row is visible.
-Omitted on runs whose tasks were written on the request
-path (201 submissions, `addTasks` batches, reruns).
+Present only on runs created by a large (202) submission
+or a large (202) rerun. `pending` — task rows are still
+streaming into storage; reads may return partial pages
+and `addTasks` returns `409`. `done` — every accepted
+task row is visible. Omitted on runs whose tasks were
+written on the request path (201 submissions and
+reruns, `addTasks` batches).
 
 <a id="Run.failure_reason"></a>
 
@@ -2737,7 +2745,7 @@ Omitted when the caller did not supply one.
 
 #### result\_url
 
-2-hour presigned download URL for the result body, or a
+24-hour presigned download URL for the result body, or a
 `/v1/jobs/<id>/runs/<run>/tasks/<tid>/content` URL you can
 fetch directly. Empty for non-successful tasks.
 
