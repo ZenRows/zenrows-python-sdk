@@ -28,6 +28,12 @@ mutually exclusive at submit, so every task sits in
 exactly one tier. If a malformed param map carries both, `auto`
 wins here (it's what the engine would honor) — but the server would
 reject that body at submit anyway.
+
+The per-task `method` / `body` fields (POST tasks) do NOT affect the
+rate card — pricing is driven by the flags above regardless of HTTP
+method, and the render-tier combinations the platform can't execute
+for POST (`js_render`, `js_instructions`, `json_response`) are
+rejected at submit, so a priced job is a billable job.
 """
 
 from collections.abc import Iterable

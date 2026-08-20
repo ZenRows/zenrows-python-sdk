@@ -1307,6 +1307,29 @@ components:
           maxLength: 2048
           description: Must be http(s). Other schemes rejected at submit.
         metadata: { $ref: '#/components/schemas/Metadata' }
+        method:
+          type: string
+          enum: [GET, POST]
+          default: GET
+          description: |
+            HTTP method used against `url`. Case-insensitive. POST is
+            for **safe/idempotent** requests only (GraphQL queries,
+            search endpoints): tasks are retried on transient failures
+            and reruns, so the target may see the same POST more than
+            once. Callers that cannot tolerate a duplicate should
+            disable reruns. POST rides the standard (non-headless)
+            scraping path — combining it with `js_render`,
+            `js_instructions`, or `json_response` is rejected with
+            400 `method_param_conflict`.
+        body:
+          description: |
+            Request body, only with `method: POST`. Any JSON value,
+            16 KiB max. An object/array/number/boolean is sent as its
+            JSON encoding with `Content-Type: application/json`; a
+            string is sent verbatim with
+            `Content-Type: application/x-www-form-urlencoded`. Set a
+            different target Content-Type via the `custom_headers`
+            zenrows param. Never echoed in results listings.
         zenrows_params:
           $ref: '#/components/schemas/ScraperParams'
           description: |
@@ -1758,6 +1781,13 @@ components:
         run_id: { type: string }
         url: { type: string, format: uri }
         metadata: { $ref: '#/components/schemas/Metadata' }
+        method:
+          type: string
+          enum: [GET, POST]
+          description: |
+            The task's HTTP method. Omitted for GET (the default).
+            The request `body` is intentionally not part of listing
+            responses.
         status: { $ref: '#/components/schemas/TaskStatus' }
         type: { $ref: '#/components/schemas/ResultType' }
         result_url:

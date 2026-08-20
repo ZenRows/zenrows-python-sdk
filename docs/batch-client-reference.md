@@ -1597,6 +1597,12 @@ exactly one tier. If a malformed param map carries both, `auto`
 wins here (it's what the engine would honor) — but the server would
 reject that body at submit anyway.
 
+The per-task `method` / `body` fields (POST tasks) do NOT affect the
+rate card — pricing is driven by the flags above regardless of HTTP
+method, and the render-tier combinations the platform can't execute
+for POST (`js_render`, `js_instructions`, `json_response`) are
+rejected at submit, so a priced job is a billable job.
+
 <a id="ParamValue"></a>
 
 #### ParamValue
@@ -1982,6 +1988,24 @@ Precedence:
 Stamped on every successful task result and used to set the
 right `Content-Type` when you fetch the content.
 
+<a id="Method"></a>
+
+## Method Objects
+
+```python
+class Method(Enum)
+```
+
+HTTP method used against `url`. Case-insensitive. POST is
+for **safe/idempotent** requests only (GraphQL queries,
+search endpoints): tasks are retried on transient failures
+and reruns, so the target may see the same POST more than
+once. Callers that cannot tolerate a duplicate should
+disable reruns. POST rides the standard (non-headless)
+scraping path — combining it with `js_render`,
+`js_instructions`, or `json_response` is rejected with
+400 `method_param_conflict`.
+
 <a id="TaskInput"></a>
 
 ## TaskInput Objects
@@ -2008,6 +2032,32 @@ assigned `task_id`.
 #### url
 
 Must be http(s). Other schemes rejected at submit.
+
+<a id="TaskInput.method"></a>
+
+#### method
+
+HTTP method used against `url`. Case-insensitive. POST is
+for **safe/idempotent** requests only (GraphQL queries,
+search endpoints): tasks are retried on transient failures
+and reruns, so the target may see the same POST more than
+once. Callers that cannot tolerate a duplicate should
+disable reruns. POST rides the standard (non-headless)
+scraping path — combining it with `js_render`,
+`js_instructions`, or `json_response` is rejected with
+400 `method_param_conflict`.
+
+<a id="TaskInput.body"></a>
+
+#### body
+
+Request body, only with `method: POST`. Any JSON value,
+16 KiB max. An object/array/number/boolean is sent as its
+JSON encoding with `Content-Type: application/json`; a
+string is sent verbatim with
+`Content-Type: application/x-www-form-urlencoded`. Set a
+different target Content-Type via the `custom_headers`
+zenrows param. Never echoed in results listings.
 
 <a id="TaskInput.zenrows_params"></a>
 
@@ -2233,6 +2283,18 @@ Picks which days the schedule fires on. Exactly one of
 #### daily
 
 Fire every day. No knobs.
+
+<a id="Method1"></a>
+
+## Method1 Objects
+
+```python
+class Method1(Enum)
+```
+
+The task's HTTP method. Omitted for GET (the default).
+The request `body` is intentionally not part of listing
+responses.
 
 <a id="WebhookConfig"></a>
 
@@ -2740,6 +2802,14 @@ class TaskResult(BaseModel)
 
 Caller-supplied correlation id from submit/AddTasks.
 Omitted when the caller did not supply one.
+
+<a id="TaskResult.method"></a>
+
+#### method
+
+The task's HTTP method. Omitted for GET (the default).
+The request `body` is intentionally not part of listing
+responses.
 
 <a id="TaskResult.result_url"></a>
 

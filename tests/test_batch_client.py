@@ -1053,3 +1053,41 @@ def test_external_id_filename_coerces_to_safe_name():
 
     missing = _task_result("T1", result_type="html")
     assert _external_id_filename(missing) == "T1.html"  # falls back to task_id
+
+
+@respx.mock
+def test_submit_job_post_task_method_body_on_wire(client: ZenRowsBatchClient):
+    """A POST task's method/body ride the wire verbatim; tasks that
+    don't set them send neither key (exclude_unset — the server treats
+    absent method as GET)."""
+    route = respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            201,
+            json={
+                "job_id": "01J0000000000000000000000",
+                "status": "closed",
+                "accepted_tasks": 2,
+            },
+        )
+    )
+
+    client.submit_job(
+        {
+            "type": "regular",
+            "status": "closed",
+            "tasks": [
+                {
+                    "url": "https://api.example.com/graphql",
+                    "method": "POST",
+                    "body": {"query": "{ products { id } }"},
+                },
+                {"url": "https://example.com/plain"},
+            ],
+        }
+    )
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["tasks"][0]["method"] == "POST"
+    assert sent["tasks"][0]["body"] == {"query": "{ products { id } }"}
+    assert "method" not in sent["tasks"][1]
+    assert "body" not in sent["tasks"][1]
