@@ -88,7 +88,7 @@ Sending headers to the target URL will overwrite our defaults. Be careful when d
 
 ### Adaptive Stealth Mode
 
-Set `mode="auto"` to let ZenRows pick the request configuration for you — it starts with the cheapest viable setup and escalates to `js_render`/`premium_proxy` only when the target needs it, billing only for the configuration that succeeds.
+Set `mode="auto"` to let Zenrows pick the request configuration for you — it starts with the cheapest viable setup and escalates to `js_render`/`premium_proxy` only when the target needs it, billing only for the configuration that succeeds.
 
 ```python
 response = client.get(url, params={"mode": "auto"})
