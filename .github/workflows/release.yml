@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Fetch source code"
+        uses: actions/checkout@v4
+
+      - name: "Install uv"
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: "Install dependencies"
+        run: uv sync --all-extras
+
+      - name: "Verify tag matches pyproject.toml version"
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag $GITHUB_REF_NAME ($TAG) does not match pyproject.toml version $PKG" >&2
+            exit 1
+          fi
+
+      - name: "Lint, format check, and typecheck"
+        run: make check
+
+      - name: "Unit tests"
+        run: make test
+
+      - name: "Build"
+        run: make build
+
+      - name: "Publish to PyPI"
+        uses: pypa/gh-action-pypi-publish@release/v1
