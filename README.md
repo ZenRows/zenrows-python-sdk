@@ -86,6 +86,16 @@ You can also pass optional `params` and `headers`; the list above is a reference
 
 Sending headers to the target URL will overwrite our defaults. Be careful when doing it and contact us if there is any problem.
 
+### Adaptive Stealth Mode
+
+Set `mode="auto"` to let Zenrows pick the request configuration for you — it starts with the cheapest viable setup and escalates to `js_render`/`premium_proxy` only when the target needs it, billing only for the configuration that succeeds.
+
+```python
+response = client.get(url, params={"mode": "auto"})
+```
+
+Compatible with `proxy_country`, `js_instructions`, and `custom_headers`.
+
 ### POST Requests
 
 The SDK also offers POST requests by calling the `client.post` method. It can receive a new parameter `data` that represents the data sent in, for example, a form. 
