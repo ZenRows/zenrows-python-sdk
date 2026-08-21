@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -228,22 +228,22 @@ wheels = [
 
 [[package]]
 name = "datamodel-code-generator"
-version = "0.58.0"
+version = "0.64.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argcomplete" },
-    { name = "black" },
+    { name = "black", marker = "sys_platform != 'emscripten'" },
     { name = "genson" },
     { name = "inflect" },
-    { name = "isort" },
+    { name = "isort", marker = "sys_platform != 'emscripten'" },
     { name = "jinja2" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d4/7f/0e838be05fb64a088730bf5a3a510f4260e43ea9fbcea8b86d97aa31ca80/datamodel_code_generator-0.58.0.tar.gz", hash = "sha256:14b157b26ca85b8dfc2fdf2ada242f003937a130375892003067a4fdf046021c", size = 986860, upload-time = "2026-05-25T03:23:53.113Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9c/d2/86c94a2836ed42231653a7ddaefa0a5bc23418167a876bba7376c96b3a35/datamodel_code_generator-0.64.0.tar.gz", hash = "sha256:9c592900a00b20e416494273c22435f5a9aef6ea8c7b9190747522a60497a1cb", size = 1316440, upload-time = "2026-06-14T17:24:50.528Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0e/f6/992262b2f7845885899a6b57ff81f97f8506d443a20b7244ee8ea85247d8/datamodel_code_generator-0.58.0-py3-none-any.whl", hash = "sha256:73c4feb12bf773e280eb721b7968a5d5dbb953be2a700bf70995ba442abd0a57", size = 274532, upload-time = "2026-05-25T03:23:51.027Z" },
+    { url = "https://files.pythonhosted.org/packages/23/94/71338e2f0146ac10747a5537b3a1e45256e66b7c229869eb0ee787111b41/datamodel_code_generator-0.64.0-py3-none-any.whl", hash = "sha256:b7cd8bd41a312aa997aec6150670bad781847c5b674f17e4d70e78208a0fb990", size = 374698, upload-time = "2026-06-14T17:24:48.809Z" },
 ]
 
 [[package]]
@@ -251,7 +251,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
