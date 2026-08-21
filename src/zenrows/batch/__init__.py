@@ -1,4 +1,4 @@
-"""Public surface for the ZenRows Batch (async-job) API.
+"""Public surface for the Zenrows Batch (async-job) API.
 
 What's where:
   - `client.ZenRowsBatchClient` — the friendly typed facade. One

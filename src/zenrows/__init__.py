@@ -1,4 +1,4 @@
-"""ZenRows Python SDK.
+"""Zenrows Python SDK.
 
 Two clients live here:
 

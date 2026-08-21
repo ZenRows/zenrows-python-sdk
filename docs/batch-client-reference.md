@@ -1,4 +1,4 @@
-# ZenRows Batch — Python SDK Reference
+# Zenrows Batch — Python SDK Reference
 
 _Auto-generated from the SDK docstrings via `make docs`. Do not edit by hand. Everything below is imported from the top-level `zenrows.batch` package (`from zenrows.batch import ...`)._
 
@@ -39,7 +39,7 @@ don't have further-actions to chain).
 class ZenRowsBatchClient()
 ```
 
-Synchronous, typed client for the ZenRows Batch API.
+Synchronous, typed client for the Zenrows Batch API.
 
 `api_key` is required. Most users read it from a secrets store or
 environment variable at the call site:
@@ -2156,7 +2156,7 @@ Vocabulary (the only keys that appear):
 - `bad_target` — target URL is the problem (bad host, 404, 410, too large)
 - `rate_limited` — target throttled the request
 - `timeout` — the scrape didn't complete in time
-- `gateway_error` — ZenRows-side transport / 5xx
+- `gateway_error` — Zenrows-side transport / 5xx
 - `other` — anything else
 
 <a id="RunStats.spend"></a>
