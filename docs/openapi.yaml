@@ -1522,7 +1522,7 @@ components:
             - `bad_target` — target URL is the problem (bad host, 404, 410, too large)
             - `rate_limited` — target throttled the request
             - `timeout` — the scrape didn't complete in time
-            - `gateway_error` — ZenRows-side transport / 5xx
+            - `gateway_error` — Zenrows-side transport / 5xx
             - `other` — anything else
           additionalProperties:
             type: integer

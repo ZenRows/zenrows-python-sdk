@@ -127,7 +127,7 @@ M = TypeVar("M", bound=BaseModel)
 
 
 class ZenRowsBatchClient:
-    """Synchronous, typed client for the ZenRows Batch API.
+    """Synchronous, typed client for the Zenrows Batch API.
 
     `api_key` is required. Most users read it from a secrets store or
     environment variable at the call site:

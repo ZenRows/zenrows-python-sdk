@@ -33,7 +33,7 @@ SECTIONS = [
 ]
 
 HEADER = (
-    "# ZenRows Batch — Python SDK Reference\n\n"
+    "# Zenrows Batch — Python SDK Reference\n\n"
     "_Auto-generated from the SDK docstrings via `make docs`. Do not edit by "
     "hand. Everything below is imported from the top-level `zenrows.batch` "
     "package (`from zenrows.batch import ...`)._\n"
