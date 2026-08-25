@@ -1983,7 +1983,7 @@ Derived server-side from `zenrows_params` at submit time.
 Precedence:
   - `response_type: markdown|plaintext|pdf` → matching format.
   - `autoparse: true`, `json_response: true`, or non-empty
-    `css_extractor` → `json`.
+    `css_extractor`/`extract` → `json`.
   - otherwise → `html`.
 Stamped on every successful task result and used to set the
 right `Content-Type` when you fetch the content.
@@ -2699,8 +2699,8 @@ re-fetch the URL right before you download.
 #### error
 
 Non-empty only when `status = failed`. Stable strings —
-e.g. `"results are larger then 1 gb"` when the combined
-results exceed the 1 GiB cap.
+e.g. `"results are larger than N gb"` when the combined
+results exceed the export byte cap (20 GiB).
 
 <a id="Export.download_url"></a>
 
@@ -2837,6 +2837,23 @@ never re-executed, and its `result_url` resolves to the
 source run's stored result. On chained retries,
 `source_run_id` chases back to the run that actually
 owns the result. Empty for normally-executed rows.
+
+<a id="TaskResult.created_at"></a>
+
+#### created\_at
+
+When the task was created.
+
+<a id="TaskResult.updated_at"></a>
+
+#### updated\_at
+
+The task's last update. Once a task is terminal
+(`successful` / `failed`) this is when it finished — use
+it to verify how fresh a result is on recurring jobs.
+On a row inherited by a partial rerun (`source_run_id`
+set) it is the time of the copy, not of the original
+scrape.
 
 <a id="TaskHistoryEvent"></a>
 

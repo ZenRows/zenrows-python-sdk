@@ -99,6 +99,8 @@ def test_iter_results_auto_paginates(client: ZenRowsBatchClient):
                 "run_id": "01R000000000000000000A",
                 "url": "https://example.com/a",
                 "status": "successful",
+                "created_at": "2026-08-25T12:00:00Z",
+                "updated_at": "2026-08-25T12:00:05Z",
             }
         ],
         "next_cursor": "abc",
@@ -110,6 +112,8 @@ def test_iter_results_auto_paginates(client: ZenRowsBatchClient):
                 "run_id": "01R000000000000000000A",
                 "url": "https://example.com/b",
                 "status": "successful",
+                "created_at": "2026-08-25T12:00:00Z",
+                "updated_at": "2026-08-25T12:00:05Z",
             }
         ],
         "next_cursor": None,
@@ -999,7 +1003,14 @@ def _task_result(
     result_url: str | None = None,
     status: str = "successful",
 ) -> TaskResult:
-    data = {"task_id": task_id, "run_id": "R", "url": "https://example.com", "status": status}
+    data = {
+        "task_id": task_id,
+        "run_id": "R",
+        "url": "https://example.com",
+        "status": status,
+        "created_at": "2026-08-25T12:00:00Z",
+        "updated_at": "2026-08-25T12:00:05Z",
+    }
     if external_id:
         data["external_id"] = external_id
     if result_type:
