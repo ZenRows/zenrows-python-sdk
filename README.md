@@ -218,6 +218,28 @@ print(f"downloaded {count} results to ./out/")
 > Need full control over the request body? `client.submit_job({...})` accepts a raw dict (the
 > wire shape) or a typed `SubmitJobRequest`, and returns the same `JobRef`.
 
+### Extract in a batch
+
+Set `extract` in `zenrows_params` to run tasks through Extract — structured data
+instead of raw HTML. It works job-wide or per task, and per-task values win on
+collision.
+
+```python
+job = client.submit_regular(
+    [
+        # Every task in this job runs through Extract...
+        {"url": "https://example.com/products", "external_id": "p1"},
+        # ...unless it overrides the job-level params.
+        {"url": "https://example.com/raw", "zenrows_params": {}},
+    ],
+    zenrows_params={"extract": "auto"},
+)
+```
+
+An Extract task's result carries two keys — `html` (the raw page) and `parsed`
+(the structured data). It costs the same as a regular task, so `estimate_cost`
+prices it correctly. `extract_fields` is not supported in Batch yet.
+
 ### Upload URLs from a CSV
 
 ```python
