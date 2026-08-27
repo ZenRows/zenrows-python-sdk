@@ -423,11 +423,9 @@ paths:
         - Honors `Idempotency-Key`: a repeat call with the same
           key returns the original new-run id.
 
-        Large reruns are accepted asynchronously: past a server-side
-        row-count threshold (the same one that upgrades large
-        submissions) the call returns `202` and the new run's task
-        rows stream into storage off the request path. Treat `201`
-        and `202` both as success.
+        Reruns are accepted asynchronously: the call returns `202`
+        and the new run's task rows stream into storage off the
+        request path. Treat `201` and `202` both as success.
       parameters:
         - in: query
           name: status
@@ -443,13 +441,13 @@ paths:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
         '201':
-          description: New run created (sync path). All task rows are written.
+          description: New run created (legacy sync fallback). All task rows are written.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RerunJobResponse' }
         '202':
           description: |
-            New run accepted (large rerun). `retried_tasks` /
+            New run accepted. `retried_tasks` /
             `inherited_tasks` are the final counts, but individual
             task rows stream into storage off the request path.
             `latest_run.ingest_status` is `pending` in this response
@@ -1001,8 +999,8 @@ paths:
         404s. There is no delete / update — expiry is the cleanup.
 
         The export fails with
-        `error: "results are larger then 1 gb"` if the combined size
-        of the results exceeds the 1 GiB cap.
+        `error: "results are larger than N gb"` if the combined size
+        of the results exceeds the export byte cap (20 GiB).
       responses:
         '202':
           description: Export accepted; the zip is produced asynchronously.
@@ -1231,7 +1229,7 @@ components:
         Precedence:
           - `response_type: markdown|plaintext|pdf` → matching format.
           - `autoparse: true`, `json_response: true`, or non-empty
-            `css_extractor` → `json`.
+            `css_extractor`/`extract` → `json`.
           - otherwise → `html`.
         Stamped on every successful task result and used to set the
         right `Content-Type` when you fetch the content.
@@ -1264,16 +1262,23 @@ components:
         `custom_headers`, `premium_proxy`, `proxy_country`,
         `session_id`, `original_status`, `allowed_status_codes`,
         `wait_for`, `wait`, `block_resources`, `json_response`,
-        `css_extractor`, `autoparse`, `response_type`, `outputs`.
+        `css_extractor`, `autoparse`, `extract`, `extract_fields`,
+        `response_type`, `outputs`.
+
+        `extract` selects the structured-extraction contract family
+        (`auto`, `native`, or `standard`); `extract_fields` optionally
+        narrows the returned fields. Extract is in private beta on the
+        scraper API — tasks against domains not enrolled fail with the
+        gateway's upgrade-required error.
 
         `custom_headers` additionally accepts an object of header
         name → value pairs (or that object serialised as a JSON
         string), e.g. `{"custom_headers": {"Referer":
         "https://www.google.com/"}}`. The headers are forwarded to
-        the scraping target, subject to Fetch's usual
+        the scraping target, subject to the scraper API's usual
         header sanitisation. At most 32 headers / 8 KB serialised;
         names must be valid HTTP tokens. Header filtering and
-        browser-header sanitisation are owned by Fetch,
+        browser-header sanitisation are owned by the scraper API,
         not Conveyor. A task-level
         `custom_headers` replaces the job-level object wholesale —
         no per-name merging.
@@ -1770,7 +1775,7 @@ components:
 
     TaskResult:
       type: object
-      required: [task_id, run_id, url, status]
+      required: [task_id, run_id, url, status, created_at, updated_at]
       properties:
         task_id: { type: string }
         external_id:
@@ -1813,6 +1818,20 @@ components:
             `source_run_id` chases back to the run that actually
             owns the result. Empty for normally-executed rows.
         spend: { $ref: '#/components/schemas/TaskSpend' }
+        created_at:
+          type: string
+          format: date-time
+          description: When the task was created.
+        updated_at:
+          type: string
+          format: date-time
+          description: |
+            The task's last update. Once a task is terminal
+            (`successful` / `failed`) this is when it finished — use
+            it to verify how fresh a result is on recurring jobs.
+            On a row inherited by a partial rerun (`source_run_id`
+            set) it is the time of the copy, not of the original
+            scrape.
 
     ListResultsResponse:
       type: object
@@ -2159,8 +2178,8 @@ components:
           nullable: true
           description: |
             Non-empty only when `status = failed`. Stable strings —
-            e.g. `"results are larger then 1 gb"` when the combined
-            results exceed the 1 GiB cap.
+            e.g. `"results are larger than N gb"` when the combined
+            results exceed the export byte cap (20 GiB).
         download_url:
           type: string
           format: uri
