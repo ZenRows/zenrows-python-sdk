@@ -19,6 +19,27 @@ This package ships two clients:
     CSV of URLs in one call. Best for offline / bulk pipelines.
     _(Private beta — [contact support](mailto:support@zenrows.com) for access.)_
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Quickstart — synchronous scraping (`ZenRowsClient`)](#quickstart--synchronous-scraping-zenrowsclient)
+  - [Adaptive Stealth Mode](#adaptive-stealth-mode)
+  - [POST Requests](#post-requests)
+  - [PUT Requests](#put-requests)
+  - [Concurrency](#concurrency)
+  - [Extract](#extract)
+- [Quickstart — Batch API (`ZenRowsBatchClient`)](#quickstart--batch-api-zenrowsbatchclient)
+  - [Extract in a batch](#extract-in-a-batch)
+  - [Upload URLs from a CSV](#upload-urls-from-a-csv)
+  - [Estimate cost before submitting](#estimate-cost-before-submitting)
+  - [Retry only the failed tasks](#retry-only-the-failed-tasks)
+  - [Download results](#download-results)
+  - [Act on an id without a GET](#act-on-an-id-without-a-get)
+  - [Scheduled jobs & webhooks](#scheduled-jobs--webhooks)
+  - [Error handling](#error-handling)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Installation
 
 ```bash
