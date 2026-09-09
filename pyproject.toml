@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zenrows"
-version = "1.4.0"
+version = "1.4.1"
 description = "ZenRows Python SDK — synchronous scraping + Batch (async job) API"
 readme = "README.md"
 license = { text = "MIT" }
