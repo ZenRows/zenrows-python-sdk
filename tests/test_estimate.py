@@ -159,3 +159,143 @@ def test_client_estimate_cost_file_input_is_zero():
     client = ZenRowsBatchClient(api_key="test-key")
     est = client.estimate_cost({"type": "regular", "status": "closed", "file_input_id": "01HKE..."})
     assert (est.task_count, est.min, est.max) == (0, 0, 0)
+
+
+# ----- duplicate detection (ENG-286) -----
+#
+# Batch does not deduplicate: identical URLs in one job are separate
+# scrapes, separate charges, separate results. The estimate counts them
+# so the caller sees it before the invoice does.
+
+
+def test_no_duplicates_in_a_clean_list():
+    est = estimate_cost(["https://a.example.com", "https://b.example.com"])
+    assert est.duplicate_tasks == 0
+
+
+def test_repeated_url_counts_as_redundant():
+    est = estimate_cost(["https://a.example.com"] * 3)
+    # All three are priced — nothing is collapsed.
+    assert est.task_count == 3
+    assert est.min == 3
+    assert est.duplicate_tasks == 2
+
+
+def test_external_id_and_metadata_do_not_distinguish_tasks():
+    est = estimate_cost(
+        [
+            {"url": "https://a.example.com", "external_id": "row-1"},
+            {"url": "https://a.example.com", "external_id": "row-2", "metadata": {"k": "v"}},
+        ]
+    )
+    assert est.duplicate_tasks == 1
+
+
+def test_urls_are_compared_exactly():
+    est = estimate_cost(
+        [
+            "https://a.example.com/p",
+            "https://a.example.com/p/",
+            "https://a.example.com/p?x=1&y=2",
+            "https://a.example.com/p?y=2&x=1",
+        ]
+    )
+    assert est.duplicate_tasks == 0
+
+
+def test_differing_task_params_keep_tasks_distinct():
+    est = estimate_cost(
+        [
+            {"url": "https://a.example.com", "zenrows_params": {"proxy_country": "us"}},
+            {"url": "https://a.example.com", "zenrows_params": {"proxy_country": "de"}},
+        ]
+    )
+    assert est.duplicate_tasks == 0
+
+
+def test_task_restating_the_job_default_duplicates_one_that_inherits_it():
+    est = estimate_cost(
+        [
+            "https://a.example.com",
+            {"url": "https://a.example.com", "zenrows_params": {"js_render": True}},
+        ],
+        zenrows_params={"js_render": "true"},
+    )
+    # Booleans and their string spellings are one value at the wire.
+    assert est.duplicate_tasks == 1
+
+
+def test_task_overriding_the_job_default_does_not():
+    est = estimate_cost(
+        [
+            "https://a.example.com",
+            {"url": "https://a.example.com", "zenrows_params": {"js_render": False}},
+        ],
+        zenrows_params={"js_render": "true"},
+    )
+    assert est.duplicate_tasks == 0
+
+
+def test_post_body_distinguishes_tasks():
+    same = estimate_cost(
+        [
+            {"url": "https://a.example.com", "method": "POST", "body": {"q": "shoes"}},
+            {"url": "https://a.example.com", "method": "POST", "body": {"q": "shoes"}},
+        ]
+    )
+    different = estimate_cost(
+        [
+            {"url": "https://a.example.com", "method": "POST", "body": {"q": "shoes"}},
+            {"url": "https://a.example.com", "method": "POST", "body": {"q": "boots"}},
+        ]
+    )
+    assert (same.duplicate_tasks, different.duplicate_tasks) == (1, 0)
+
+
+def test_get_spellings_collapse_onto_the_default():
+    est = estimate_cost(
+        [
+            "https://a.example.com",
+            {"url": "https://a.example.com"},
+            {"url": "https://a.example.com", "method": "get"},
+        ]
+    )
+    assert est.duplicate_tasks == 2
+
+
+def test_post_and_get_on_one_url_are_different_requests():
+    est = estimate_cost(
+        [
+            {"url": "https://a.example.com"},
+            {"url": "https://a.example.com", "method": "POST", "body": {"q": "shoes"}},
+        ]
+    )
+    assert est.duplicate_tasks == 0
+
+
+def test_taskinput_models_are_deduplicated_too():
+    est = estimate_cost(
+        [
+            TaskInput(url="https://a.example.com", external_id="one"),
+            TaskInput(url="https://a.example.com", external_id="two"),
+            TaskInput(url="https://b.example.com"),
+        ]
+    )
+    assert est.duplicate_tasks == 1
+
+
+def test_format_names_duplicates_only_when_present():
+    clean = estimate_cost(["https://a.example.com"])
+    assert "duplicate" not in clean.format()
+
+    dirty = estimate_cost(["https://a.example.com"] * 2)
+    assert "1 duplicate task — scraped and charged separately" in dirty.format()
+
+
+def test_client_estimate_cost_reports_duplicates():
+    client = ZenRowsBatchClient(api_key="k")
+    est = client.estimate_cost(
+        {"tasks": [{"url": "https://a.example.com"}, {"url": "https://a.example.com"}]}
+    )
+    assert isinstance(est, CostEstimate)
+    assert est.duplicate_tasks == 1

@@ -29,6 +29,14 @@ exactly one tier. If a malformed param map carries both, `auto`
 wins here (it's what the engine would honor) — but the server would
 reject that body at submit anyway.
 
+An estimate also reports `duplicate_tasks`: how many of the tasks
+repeat a request an earlier task in the same list already makes. Batch
+does **not** deduplicate — each one is a separate scrape, a separate
+charge, and a separate result — and `Idempotency-Key` does not help
+(it deduplicates whole submits, never URLs inside one). The server
+returns the same count on the submit response; this computes it before
+you spend anything.
+
 The per-task `method` / `body` fields (POST tasks) do NOT affect the
 rate card — pricing is driven by the flags above regardless of HTTP
 method, and the render-tier combinations the platform can't execute
@@ -36,8 +44,9 @@ for POST (`js_render`, `js_instructions`, `json_response`) are
 rejected at submit, so a priced job is a billable job.
 """
 
+import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from zenrows.batch.models import TaskInput
@@ -136,6 +145,12 @@ class CostEstimate:
     min: int
     max: int
     breakdown: tuple[CostLine, ...]
+    duplicate_tasks: int = field(default=0)
+    """How many tasks repeat a request an earlier task already makes.
+    Advisory: nothing is deduplicated, so these are counted in
+    `task_count` and priced into `min`/`max` like any other task. Three
+    identical tasks read as `task_count=3, duplicate_tasks=2`. The
+    submit response carries the same number."""
 
     @property
     def exact(self) -> bool:
@@ -166,6 +181,11 @@ class CostEstimate:
                 f"{line.subtotal_min}" if line.exact else f"{line.subtotal_min}-{line.subtotal_max}"
             )
             lines.append(f"  {line.count:>6} x {line.tier.value} ({unit}) = {sub}")
+        if self.duplicate_tasks:
+            noun = "task" if self.duplicate_tasks == 1 else "tasks"
+            lines.append(
+                f"  {self.duplicate_tasks:>6} duplicate {noun} — scraped and charged separately"
+            )
         return "\n".join(lines)
 
 
@@ -212,6 +232,85 @@ def _task_params(task: TaskLike) -> ParamMap:
     raise TypeError(f"unsupported task type for estimation: {type(task).__name__}")
 
 
+def _task_url(task: TaskLike) -> str:
+    """Pull the URL from any accepted task shape. `AnyUrl` is rendered
+    the way the client will serialise it at submit, so the comparison
+    matches what the server receives."""
+    if isinstance(task, str):
+        return task
+    if isinstance(task, TaskInput):
+        return str(task.url)
+    if isinstance(task, dict):
+        return str(task.get("url", ""))
+    raise TypeError(f"unsupported task type for estimation: {type(task).__name__}")
+
+
+def _task_method(task: TaskLike) -> str:
+    """Canonical HTTP method. GET (and its spellings, and the default)
+    collapse to "" — matching the server, which stores GET as absent."""
+    if isinstance(task, str):
+        return ""
+    raw: object = None
+    if isinstance(task, TaskInput):
+        raw = task.method
+    elif isinstance(task, dict):
+        raw = task.get("method")
+    value = getattr(raw, "value", raw)
+    method = str(value or "").strip().upper()
+    return "" if method == "GET" else method
+
+
+def _task_body(task: TaskLike) -> object:
+    if isinstance(task, str):
+        return None
+    if isinstance(task, TaskInput):
+        return task.body
+    if isinstance(task, dict):
+        return task.get("body")
+    return None
+
+
+def _scalar_key(value: ParamValue) -> str:
+    """Render a param value the way the server coerces it — booleans to
+    `"true"` / `"false"`, everything else to its string form — so
+    `{"js_render": True}` and `{"js_render": "true"}` are one request,
+    as they are at the wire."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return str(value)
+
+
+def _request_key(task: TaskLike, merged: ParamMap) -> tuple:
+    """What decides whether two tasks fetch the same thing: the URL, the
+    canonical method, the body, and the merged params.
+
+    Deliberately excluded: `external_id` and `metadata`. They are
+    caller-side annotation — two tasks differing only there still fetch
+    the same bytes twice and are still billed twice, which is the point
+    of counting.
+
+    URLs are compared exactly. No trailing-slash, query-order, or
+    encoding normalisation: those rules aren't settled, and guessing
+    would report duplicates the engine doesn't have.
+
+    The body is compared by JSON value rather than by the bytes the
+    server will see, so two bodies differing only in key order count as
+    one request here. The server, comparing what arrived on the wire,
+    may read them as distinct — the only case where the two counts can
+    disagree, and it errs toward telling you about redundant work.
+    """
+    body = _task_body(task)
+    body_key = (
+        None
+        if body is None
+        else json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)
+    )
+    params_key = tuple(sorted((k, _scalar_key(v)) for k, v in merged.items()))
+    return (_task_url(task), _task_method(task), body_key, params_key)
+
+
 def _estimate_cost(
     tasks: Iterable[TaskLike],
     *,
@@ -229,6 +328,11 @@ def _estimate_cost(
     `breakdown`. `min == max` (``.exact``) when no task uses
     ``mode=auto``.
 
+    ``duplicate_tasks`` reports how many tasks repeat a request an
+    earlier task already makes. Batch does not deduplicate, so those
+    are priced in like any other task — the count is there to tell you
+    before the invoice does.
+
     Note: `file_input` (CSV) jobs can't be estimated this way — the
     row count isn't known client-side. Estimate from the in-memory
     task list, or count the rows yourself first.
@@ -239,9 +343,16 @@ def _estimate_cost(
     total_min = 0
     total_max = 0
     count = 0
+    duplicates = 0
+    seen: set[tuple] = set()
     for task in tasks:
         count += 1
         merged = {**job_params, **_task_params(task)}
+        key = _request_key(task, merged)
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
         tc = _cost_for_params(merged)
         total_min += tc.min
         total_max += tc.max
@@ -255,7 +366,13 @@ def _estimate_cost(
         for tier in _TIER_ORDER
         if tier in agg
     )
-    return CostEstimate(task_count=count, min=total_min, max=total_max, breakdown=breakdown)
+    return CostEstimate(
+        task_count=count,
+        min=total_min,
+        max=total_max,
+        breakdown=breakdown,
+        duplicate_tasks=duplicates,
+    )
 
 
 __all__ = [
