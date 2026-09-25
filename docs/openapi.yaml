@@ -1457,12 +1457,11 @@ components:
           type: integer
           default: 0
           description: |
-            Always emitted by the current server; not `required`, for
-            the same forward-compatibility reason as on
-            `SubmitJobResponse`.
+            Not `required`, so a client built against this spec keeps
+            parsing responses from a server that predates the field.
 
             Repeats **within this batch**, same rule as
-            `SubmitJobResponse.duplicate_tasks`. Tasks already on the
+            `Run.duplicate_tasks`. Tasks already on the
             run are not consulted: a URL sent in an earlier batch and
             again in this one does not count.
         job_status: { $ref: '#/components/schemas/JobStatus' }
