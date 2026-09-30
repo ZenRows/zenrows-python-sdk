@@ -67,6 +67,27 @@ reads it to emit the models. To refresh after a backend spec change:
 4. If the wire shape changed, update `src/zenrows/batch/client.py`
    so the facade method signatures still typecheck.
 
+## Open enums (generated)
+
+docs/openapi.yaml marks the response enums `x-extensible-enum: true`: the
+server may add values at any time. After datamodel-codegen runs,
+`make generate` calls `scripts/open_extensible_enums.py`, which matches each
+extensible schema in the spec to its generated Enum (by value set) and adds
+
+```python
+_missing_ = classmethod(open_enum_missing)
+```
+
+from `src/zenrows/batch/_open_enum.py`. An unknown value becomes a cached
+`UNKNOWN` pseudo-member keeping the raw value (serializes back verbatim,
+hashable, picklable, absent from iteration). Enums without the flag
+(request side, e.g. `JobType`) stay strict, so a typo still fails locally.
+The step is a script because datamodel-codegen does not expose schema
+extensions to enum templates.
+
+`tests/test_open_enums.py` derives both sets from the spec and fails if a
+regeneration drops the hook or applies it to a strict enum.
+
 ## Publishing
 
 ```bash

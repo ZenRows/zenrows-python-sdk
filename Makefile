@@ -27,6 +27,11 @@ format:
 # Regenerate the pydantic v2 models from the backend's canonical spec.
 # docs/openapi.yaml is the SDK-local copy of the spec; refresh it from the
 # backend when the API changes.
+# Open enums: scripts/open_extensible_enums.py then adds a `_missing_` hook
+# (src/zenrows/batch/_open_enum.py) to every enum the spec marks
+# `x-extensible-enum: true`, so a value the server adds later parses as an
+# UNKNOWN member keeping the raw value. Other (request-side) enums stay strict.
+# tests/test_open_enums.py fails if a regeneration drops the hook.
 # The HTTP client + facade are HAND-WRITTEN in src/zenrows/batch/client.py;
 # only the type definitions come from this command.
 generate:
@@ -48,6 +53,7 @@ generate:
 		--capitalise-enum-members \
 		--reuse-model \
 		--use-default
+	uv run python scripts/open_extensible_enums.py docs/openapi.yaml src/zenrows/batch/models.py
 
 # Regenerate the markdown API reference (docs/batch-client-reference.md) from
 # the SDK's docstrings via pydoc-markdown (ephemeral — no permanent dep). The

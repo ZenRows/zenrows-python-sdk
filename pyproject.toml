@@ -67,6 +67,8 @@ dev-dependencies = [
     # OpenAPI → pydantic-v2 models. Run via `uv run make-models`
     # (Makefile recipe). Output lands at src/zenrows/batch/models.py.
     "datamodel-code-generator>=0.26",
+    # scripts/open_extensible_enums.py reads the spec (make generate).
+    "pyyaml>=6",
 ]
 
 # --- ruff ---
