@@ -14,13 +14,16 @@ import json
 import pickle
 from pathlib import Path
 
+import httpx
 import pytest
+import respx
 import yaml
 from pydantic import TypeAdapter
 
-from zenrows.batch import models
+from zenrows import ZenRowsBatchClient
+from zenrows.batch import BatchAPIError, models
 from zenrows.batch._open_enum import is_unknown
-from zenrows.batch.models import Job, Run
+from zenrows.batch.models import FailureReason, Job, Run
 
 FUTURE = "some_future_value"
 
@@ -54,7 +57,7 @@ STRICT = [c for c in GENERATED_ENUMS if c not in EXTENSIBLE]
 def test_module_has_enums():
     # Guard against the iteration silently finding nothing.
     assert len(GENERATED_ENUMS) >= 17
-    assert len(EXTENSIBLE) >= len(EXTENSIBLE_SETS) >= 9
+    assert len(EXTENSIBLE) >= len(EXTENSIBLE_SETS) >= 10
     assert STRICT, "request-side enums must stay strict"
     assert models.FailureReason in EXTENSIBLE
     assert models.JobType in STRICT
@@ -102,6 +105,10 @@ def test_known_values_still_map_to_members(enum_cls):
         assert not is_unknown(parsed)
 
 
+def test_failure_reason_has_api_key_cap_reached():
+    assert FailureReason("api_key_cap_reached") is FailureReason.API_KEY_CAP_REACHED
+
+
 RUN = {
     "run_id": "01R000000000000000000A",
     "job_id": "01J000000000000000000A",
@@ -111,6 +118,7 @@ RUN = {
     "created_at": "2026-09-30T10:00:00Z",
     "updated_at": "2026-09-30T10:05:00Z",
     "failure_reason": "some_future_reason",
+    "failure_detail": "Something we have not invented yet.",
 }
 
 
@@ -118,6 +126,7 @@ def test_run_with_future_failure_reason_parses():
     run = Run.model_validate(RUN)
     assert run.failure_reason is not None
     assert run.failure_reason.value == "some_future_reason"
+    assert run.failure_detail == "Something we have not invented yet."
     assert json.loads(run.model_dump_json())["failure_reason"] == "some_future_reason"
 
 
@@ -136,3 +145,41 @@ def test_job_with_future_values_parses():
     assert job.latest_run is not None
     assert job.latest_run.failure_reason is not None
     assert job.latest_run.failure_reason.value == "some_future_reason"
+    assert job.latest_run.failure_detail == RUN["failure_detail"]
+
+
+def test_api_key_cap_reached_run_parses():
+    run = Run.model_validate(
+        {
+            **RUN,
+            "failure_reason": "api_key_cap_reached",
+            "failure_detail": "Daily cap reached; resets at 00:00 UTC.",
+        }
+    )
+    assert run.failure_reason is FailureReason.API_KEY_CAP_REACHED
+
+
+@respx.mock
+def test_402_api_key_cap_reached_surfaces_code_and_detail():
+    base = "http://localhost:9000/v1"
+    client = ZenRowsBatchClient(api_key="k", base_url=base)
+    detail = "This API key reached its daily credit cap; it resets at 00:00 UTC."
+    respx.post(f"{base}/jobs").mock(
+        return_value=httpx.Response(
+            402,
+            headers={"Content-Type": "application/problem+json"},
+            json={
+                "type": "about:blank",
+                "title": "Payment Required",
+                "status": 402,
+                "code": "api_key_cap_reached",
+                "detail": detail,
+            },
+        )
+    )
+    with pytest.raises(BatchAPIError) as exc:
+        client.submit_job({"type": "regular", "tasks": [{"url": "https://example.com"}]})
+    assert exc.value.status_code == 402
+    assert exc.value.code == "api_key_cap_reached"
+    assert exc.value.detail == detail
+    assert exc.value.problem is not None and exc.value.problem.detail == detail

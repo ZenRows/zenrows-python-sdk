@@ -367,6 +367,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Run' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Latest run is terminal; resume does not apply.
@@ -460,6 +461,7 @@ paths:
               schema: { $ref: '#/components/schemas/RerunJobResponse' }
         '400': { $ref: '#/components/responses/InvalidArgument' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '402': { $ref: '#/components/responses/PaymentRequired' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Latest run not terminal, no prior run available, no tasks match the filter, or idempotency-key reused with a different body.
@@ -1113,7 +1115,16 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     PaymentRequired:
-      description: Subscription has no credit available.
+      description: |
+        The run cannot start because of billing. The problem `code`
+        tells the cases apart:
+        - `payment_required` — the subscription has expired or has no
+          credit available.
+        - `api_key_cap_reached` — this API key reached one of its
+          credit caps. `detail` names the window, the cap and when it
+          resets (UTC). Other keys on the account are unaffected.
+
+        Clients must accept `code` values not listed here.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -1164,6 +1175,8 @@ components:
         - `deleted` — async deletion in progress; the job disappears
           once it finishes.
 
+        Clients must accept values not listed here.
+
     ScheduleState:
       type: string
       enum: [active, paused]
@@ -1190,6 +1203,8 @@ components:
         - `scheduled` — automatic, fired by the configured
           schedule (recurring or one-shot).
 
+        Clients must accept values not listed here.
+
     RunStatus:
       type: string
       x-extensible-enum: true
@@ -1206,25 +1221,32 @@ components:
           Result bodies are kept. `stats.completed < stats.total`
           signals "stopped early".
         - `failed` — the run was auto-failed on an account-level error
-          (insufficient credits / inactive subscription). No new tasks
-          are picked up; `failure_reason` carries the cause. Re-runnable
-          once the account is resolved. Result bodies already produced
+          (insufficient credits / inactive subscription / the API key's
+          credit cap reached). No new tasks are picked up;
+          `failure_reason` and `failure_detail` carry the cause.
+          Re-runnable once the account or cap is resolved. Result bodies already produced
           are kept.
         - `deleted` — caller called
           `DELETE /v1/jobs/{id}/runs/{run_id}`. The run's result
           bodies and data are being deleted; once complete the run
           disappears.
 
+        Clients must accept values not listed here.
+
     TaskStatus:
       type: string
       x-extensible-enum: true
       enum: [pending, processing, successful, failed]
+      description: Clients must accept values not listed here.
 
     ResultType:
       type: string
       x-extensible-enum: true
       enum: [html, json, markdown, plaintext, pdf]
-      description: Body format of a successful task result; matches the job's `format` 1:1.
+      description: |
+        Body format of a successful task result; matches the job's `format` 1:1.
+
+        Clients must accept values not listed here.
 
     Format:
       type: string
@@ -1239,6 +1261,8 @@ components:
           - otherwise → `html`.
         Stamped on every successful task result and used to set the
         right `Content-Type` when you fetch the content.
+
+        Clients must accept values not listed here.
 
     Metadata:
       type: object
@@ -1583,18 +1607,35 @@ components:
             task row is visible. Omitted on runs whose tasks were
             written on the request path (201 submissions and
             reruns, `addTasks` batches).
+
+            Clients must accept values not listed here.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         failure_reason:
           type: string
           x-extensible-enum: true
-          enum: [insufficient_credits, subscription_inactive]
+          enum: [insufficient_credits, subscription_inactive, api_key_cap_reached]
           description: |
             Present only when `status == failed`: the account-level
-            cause of the auto-fail. `insufficient_credits` (out of
-            credits) or `subscription_inactive` (subscription not
-            active). Omitted otherwise. Distinct from
+            cause of the auto-fail. Omitted otherwise. Distinct from
             `stats.failure_reasons` (the per-task rollup).
+            - `insufficient_credits` — the account is out of credits.
+            - `subscription_inactive` — the subscription is not active.
+            - `api_key_cap_reached` — the job's API key reached one of
+              its credit caps (day, week, month or billing period).
+              Resolves on its own when that cap's window resets, or
+              when the cap is raised.
+
+            Clients must accept values not listed here.
+        failure_detail:
+          type: string
+          nullable: true
+          description: |
+            Human-readable explanation of `failure_reason`, e.g. which
+            cap was reached and when it resets. Present only when
+            `failure_reason` is. Free text for display: branch on
+            `failure_reason`, never on this string.
+          example: Subscription has no credit available.
 
     JobSchedule:
       type: object
@@ -1907,6 +1948,49 @@ components:
             deliveries carry **no** `X-Signature` header — header
             absence is the signal.
 
+    WebhookEventType:
+      type: string
+      x-extensible-enum: true
+      enum: [run.completed, run.failed, webhook.test]
+      description: |
+        `event_type` of a webhook delivery (see `WebhookEvent`).
+        - `run.completed` — the run finished naturally.
+        - `run.failed` — the run auto-failed on an account-level
+          error; `failure_reason` and `failure_detail` carry the cause.
+        - `webhook.test` — synthetic delivery from `POST /v1/webhook/test`.
+
+        Clients must accept values not listed here.
+
+    WebhookEvent:
+      type: object
+      required: [schema, event_id, event_type, occurred_at, job_id, run_id, run_sequence]
+      description: |
+        Body POSTed to the configured webhook URL (`WebhookConfig`).
+      properties:
+        schema: { type: string }
+        event_id: { type: string }
+        event_type: { $ref: '#/components/schemas/WebhookEventType' }
+        occurred_at: { type: string, format: date-time }
+        job_id: { type: string }
+        external_id: { type: string }
+        metadata: { $ref: '#/components/schemas/Metadata' }
+        run_id: { type: string }
+        run_sequence: { type: integer, minimum: 1 }
+        stats: { $ref: '#/components/schemas/RunStats' }
+        failure_reason:
+          type: string
+          x-extensible-enum: true
+          enum: [insufficient_credits, subscription_inactive, api_key_cap_reached]
+          description: |
+            `run.failed` only. Same vocabulary as `Run.failure_reason`.
+            Clients must accept values not listed here.
+        failure_detail:
+          type: string
+          nullable: true
+          description: |
+            `run.failed` only, present when `failure_reason` is. Same as
+            `Run.failure_detail`.
+
     TestWebhookRequest:
       type: object
       required: [url]
@@ -2108,7 +2192,12 @@ components:
         title: { type: string }
         status: { type: integer }
         detail: { type: string }
-        code: { type: string }
+        code:
+          type: string
+          description: |
+            Stable machine-readable error code, e.g. `payment_required`
+            or `api_key_cap_reached`. Branch on this, not on `detail`.
+            Clients must accept values not listed here.
         instance: { type: string }
         invalid_tasks:
           type: array
@@ -2121,6 +2210,7 @@ components:
               reason:
                 type: string
                 x-extensible-enum: true
+                description: Clients must accept values not listed here.
                 enum:
                   - malformed_url
                   - unsupported_scheme
@@ -2150,6 +2240,8 @@ components:
         * `running` — the zip is being produced.
         * `completed` — `download_url` will be present.
         * `failed`   — `error` carries the reason.
+
+        Clients must accept values not listed here.
 
     StartExportResponse:
       type: object

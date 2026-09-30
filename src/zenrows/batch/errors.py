@@ -59,7 +59,9 @@ class BatchAPIError(Exception):
     """A non-2xx response from the Batch API.
 
     `code` is the RFC 7807 `code` member (e.g. `file_input_not_found`,
-    `idempotency_key_conflict`). Stable; safe to branch on.
+    `idempotency_key_conflict`, `api_key_cap_reached`). Stable; safe to
+    branch on. `detail` is the human-readable explanation (e.g. which
+    credit cap was reached and when it resets): display it, don't parse it.
     """
 
     def __init__(self, status_code: int, problem: ProblemDetail | None, raw: bytes):
@@ -67,6 +69,7 @@ class BatchAPIError(Exception):
         self.problem = problem
         self.raw = raw
         self.code: str = problem.code if problem else "internal"
+        self.detail: str | None = problem.detail if problem else None
         msg = (
             f"{status_code} {problem.title}: {problem.detail or problem.code}"
             if problem
