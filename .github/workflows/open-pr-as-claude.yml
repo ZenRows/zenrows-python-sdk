@@ -1,0 +1,68 @@
+name: Open PR as Claude
+
+# A dispatchable stub. The workflow itself lives in cicd-templates, because
+# every repo that wants this needs the same 130 lines and copies drift.
+#
+# The stub has to be here regardless: a workflow must exist in this repo to be
+# dispatchable, and `workflow_call` alone is not dispatchable.
+#
+# Push the branch, write the description, then dispatch against main:
+#
+#   gh workflow run open-pr-as-claude.yml --ref main \
+#      -f branch=cor-NNN/slug -f title="COR-NNN: ..." -F body=@pr-body.md
+#
+# --ref main is not a style choice. The app-token exchange validates the
+# running workflow against the default branch and 401s when they differ.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Head branch to open the PR from (must already be pushed to origin)"
+        required: true
+        type: string
+      base:
+        description: "Base branch to merge into"
+        required: false
+        type: string
+        default: main
+      title:
+        description: "Pull request title (leave empty to use the subject of the newest commit on the branch)"
+        required: false
+        type: string
+        default: ""
+      body:
+        description: "The PR description, posted verbatim (write it from the plugin's pr-format contract). An empty body fails the run before any model starts"
+        required: false
+        type: string
+        default: ""
+      draft:
+        description: "Open as a draft PR"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  open-pr:
+    uses: ZenRows/cicd-templates/.github/workflows/open-pr-as-claude.yaml@main
+    # The template authenticates with CLAUDE_CODE_OAUTH_TOKEN, or with workload
+    # identity federation when this repo sets the four ANTHROPIC_* Actions
+    # variables. Either way nothing here changes.
+    secrets: inherit
+    # Declared at the call site, not left to the repo default. A called
+    # workflow's permissions can only narrow what the calling job already has,
+    # and `id-token: write` is never part of a repo's default grant -- without
+    # it here the app-token exchange cannot authenticate and the PR is not
+    # authored by claude[bot]. `contents` stays `read`: this job reads the head
+    # branch and never pushes, merges or forces.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+      actions: read
+    with:
+      branch: ${{ inputs.branch }}
+      base: ${{ inputs.base }}
+      title: ${{ inputs.title }}
+      body: ${{ inputs.body }}
+      draft: ${{ inputs.draft }}

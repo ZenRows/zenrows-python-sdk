@@ -1,0 +1,28 @@
+name: Claude Code Review
+
+# Thin caller of the shared reviewer in ZenRows/cicd-templates. The template
+# reviews each commit once, drafts included, and its gate fails the check when
+# a review stalls instead of going green on a verdict nobody posted.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    uses: ZenRows/cicd-templates/.github/workflows/claude-code-review.yaml@main
+    # Declared here, not left to the repo default. A called workflow can only
+    # narrow what the calling job has, and `id-token: write` is never part of
+    # a repo's default grant.
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    with:
+      # open-pr-as-claude.yml opens PRs as claude[bot]. The action refuses a
+      # bot actor unless it is listed here, one second in and before any model
+      # turn, so without this line those PRs are never reviewed.
+      allowed_bots: "claude[bot]"
+    # The template reads secrets.CLAUDE_CODE_OAUTH_TOKEN and declares no
+    # `secrets:` block, so only `inherit` can reach it.
+    secrets: inherit
