@@ -1633,8 +1633,9 @@ components:
           description: |
             Human-readable explanation of `failure_reason`, e.g. which
             cap was reached and when it resets. Present only when
-            `failure_reason` is. Free text for display: branch on
-            `failure_reason`, never on this string.
+            `failure_reason` is. At most 500 characters (Unicode code
+            points); longer upstream text is cut. Free text for display:
+            branch on `failure_reason`, never on this string.
           example: Subscription has no credit available.
 
     JobSchedule:
@@ -1989,7 +1990,8 @@ components:
           nullable: true
           description: |
             `run.failed` only, present when `failure_reason` is. Same as
-            `Run.failure_detail`.
+            `Run.failure_detail`: at most 500 characters (Unicode code
+            points).
 
     TestWebhookRequest:
       type: object
