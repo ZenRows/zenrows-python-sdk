@@ -1154,6 +1154,7 @@ components:
 
     JobStatus:
       type: string
+      x-extensible-enum: true
       enum: [open, closed, deleted]
       description: |
         - `open` — initial run still accepting `addTasks`. Only
@@ -1179,6 +1180,7 @@ components:
 
     RunTrigger:
       type: string
+      x-extensible-enum: true
       enum: [manual, scheduled]
       description: |
         What set this run in motion. Always set.
@@ -1190,6 +1192,7 @@ components:
 
     RunStatus:
       type: string
+      x-extensible-enum: true
       enum: [running, pending, completed, stopped, failed, deleted]
       description: |
         In-flight:
@@ -1214,15 +1217,18 @@ components:
 
     TaskStatus:
       type: string
+      x-extensible-enum: true
       enum: [pending, processing, successful, failed]
 
     ResultType:
       type: string
+      x-extensible-enum: true
       enum: [html, json, markdown, plaintext, pdf]
       description: Body format of a successful task result; matches the job's `format` 1:1.
 
     Format:
       type: string
+      x-extensible-enum: true
       enum: [html, json, markdown, plaintext, pdf]
       description: |
         Derived server-side from `zenrows_params` at submit time.
@@ -1567,6 +1573,7 @@ components:
             `/resume`.
         ingest_status:
           type: string
+          x-extensible-enum: true
           enum: [pending, done]
           description: |
             Present only on runs created by a large (202) submission
@@ -1580,6 +1587,7 @@ components:
         updated_at: { type: string, format: date-time }
         failure_reason:
           type: string
+          x-extensible-enum: true
           enum: [insufficient_credits, subscription_inactive]
           description: |
             Present only when `status == failed`: the account-level
@@ -2112,6 +2120,7 @@ components:
               index: { type: integer }
               reason:
                 type: string
+                x-extensible-enum: true
                 enum:
                   - malformed_url
                   - unsupported_scheme
@@ -2133,6 +2142,7 @@ components:
 
     ExportStatus:
       type: string
+      x-extensible-enum: true
       enum: [pending, running, completed, failed]
       description: |
         Lifecycle state of a results export.
