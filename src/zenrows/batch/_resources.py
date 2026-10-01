@@ -776,7 +776,8 @@ class JobRef:
         ``stop()`` left orphan ``pending`` rows.
 
         Returns a :class:`RunHandle` for the new run. Requires the
-        previous run to be terminal (``completed`` / ``stopped``); raises
+        previous run to be terminal (``completed`` / ``stopped`` /
+        ``failed``); raises
         ``BatchAPIError`` (409 ``run_not_terminal``) otherwise, and
         (409 ``no_matching_tasks``) when nothing matched the filter.
         """

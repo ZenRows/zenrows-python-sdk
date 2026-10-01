@@ -105,9 +105,15 @@ from zenrows.batch.models import (
 
 # Run states that mean "no further work will happen on this run".
 # Used as the default target for waiters; a run that's `completed`,
-# `stopped`, or `deleted` never transitions again.
+# `stopped`, `failed` (account-level stop, e.g. `api_key_cap_reached`
+# or `insufficient_credits`), or `deleted` never transitions again.
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
-    {RunStatus.COMPLETED.value, RunStatus.STOPPED.value, RunStatus.DELETED.value}
+    {
+        RunStatus.COMPLETED.value,
+        RunStatus.STOPPED.value,
+        RunStatus.FAILED.value,
+        RunStatus.DELETED.value,
+    }
 )
 
 # Export states that don't transition again — `completed` (zip ready)
@@ -570,6 +576,12 @@ class ZenRowsBatchClient:
         """Block until a run reaches one of `target_statuses`, polling
         with jittered exponential backoff.
 
+        The default targets are every terminal status, `failed`
+        included, so a run the API auto-failed is returned (read
+        `failure_reason` / `failure_detail` on it) rather than polled
+        until `timeout`. Pass `failure_statuses={"failed"}` to have the
+        waiter raise `WaiterError` on it instead.
+
         `progress=True` shows a tqdm bar with totals as they advance.
         `None` inherits the client-level `progress` setting (which
         itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
@@ -974,6 +986,11 @@ class ZenRowsBatchClient:
         progress: bool = False,
     ) -> Run:
         target = target_statuses or TERMINAL_RUN_STATUSES
+        if failure_statuses:
+            # `poll_until` checks `is_done` first, so a status in both
+            # sets would return instead of raising. A caller naming a
+            # failure status means "raise on it" — that wins.
+            target = frozenset(target) - frozenset(failure_statuses)
 
         def fetch() -> Run:
             if not run_id:
