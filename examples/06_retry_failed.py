@@ -8,7 +8,8 @@ the new run's totals already carry the prior successes. Pass
 (handy after a `stop()`). It's a thin shortcut for
 `job.rerun(status="failed")`.
 
-Requires the previous run to be terminal (`completed` / `stopped`);
+Requires the previous run to be terminal (`completed` / `stopped` /
+`failed`);
 otherwise the API returns `409 run_not_terminal` — call
 `job.run.stop()` first if it's still live.
 

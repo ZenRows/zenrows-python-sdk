@@ -446,7 +446,8 @@ client.submit_regular(
 
 Every non-2xx surfaces as `BatchAPIError`; the `code` attribute carries
 the stable code from the RFC 7807 body (`file_input_not_found`,
-`idempotency_key_conflict`, etc.).
+`idempotency_key_conflict`, `api_key_cap_reached`, etc.) and `detail` the
+human-readable explanation (for a credit cap: which cap, and when it resets).
 
 ```python
 from zenrows.batch import BatchAPIError
@@ -458,6 +459,27 @@ except BatchAPIError as exc:
         ...
     raise
 ```
+
+### Forward-compatible enums
+
+Every enum the Batch API returns (`RunStatus`, `FailureReason`, ...) is open:
+a value the server adds after your SDK version was released parses as an
+`UNKNOWN` member whose `.value` is the raw string, instead of failing the
+whole response. Branch on the members you know and keep a fallback:
+
+```python
+from zenrows.batch.models import FailureReason
+
+run = client.get_run(job_id, run_id=run_id).data
+if run.failure_reason is FailureReason.API_KEY_CAP_REACHED:
+    print(run.failure_detail)  # which cap was reached and when it resets
+elif run.failure_reason is not None:
+    print("failed:", run.failure_reason.value)  # includes values unknown to this SDK
+```
+
+Runs that fail because an API key reached its credit cap carry
+`failure_reason = "api_key_cap_reached"`. Older SDK versions without open enums cannot
+parse such runs, so upgrade before enabling API key credit caps with Batch.
 
 The full Batch surface (jobs, runs, tasks, results, content, history,
 file_inputs, HMAC keys) is reachable via methods on `ZenRowsBatchClient`.

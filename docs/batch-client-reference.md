@@ -410,6 +410,12 @@ def wait_for_run(job_id: str,
 Block until a run reaches one of `target_statuses`, polling
 with jittered exponential backoff.
 
+The default targets are every terminal status, `failed`
+included, so a run the API auto-failed is returned (read
+`failure_reason` / `failure_detail` on it) rather than polled
+until `timeout`. Pass `failure_statuses={"failed"}` to have the
+waiter raise `WaiterError` on it instead.
+
 `progress=True` shows a tqdm bar with totals as they advance.
 `None` inherits the client-level `progress` setting (which
 itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
@@ -1219,7 +1225,8 @@ started (``status="failed,pending"``) — the usual move after a
 ``stop()`` left orphan ``pending`` rows.
 
 Returns a :class:`RunHandle` for the new run. Requires the
-previous run to be terminal (``completed`` / ``stopped``); raises
+previous run to be terminal (``completed`` / ``stopped`` /
+``failed``); raises
 ``BatchAPIError`` (409 ``run_not_terminal``) otherwise, and
 (409 ``no_matching_tasks``) when nothing matched the filter.
 
@@ -1871,7 +1878,9 @@ class BatchAPIError(Exception)
 A non-2xx response from the Batch API.
 
 `code` is the RFC 7807 `code` member (e.g. `file_input_not_found`,
-`idempotency_key_conflict`). Stable; safe to branch on.
+`idempotency_key_conflict`, `api_key_cap_reached`). Stable; safe to
+branch on. `detail` is the human-readable explanation (e.g. which
+credit cap was reached and when it resets): display it, don't parse it.
 
 # Models
 
@@ -1906,6 +1915,8 @@ class JobStatus(Enum)
 - `deleted` — async deletion in progress; the job disappears
   once it finishes.
 
+Clients must accept values not listed here.
+
 <a id="ScheduleState"></a>
 
 ## ScheduleState Objects
@@ -1933,6 +1944,8 @@ What set this run in motion. Always set.
 - `scheduled` — automatic, fired by the configured
   schedule (recurring or one-shot).
 
+Clients must accept values not listed here.
+
 <a id="RunStatus"></a>
 
 ## RunStatus Objects
@@ -1952,14 +1965,27 @@ Terminal:
   Result bodies are kept. `stats.completed < stats.total`
   signals "stopped early".
 - `failed` — the run was auto-failed on an account-level error
-  (insufficient credits / inactive subscription). No new tasks
-  are picked up; `failure_reason` carries the cause. Re-runnable
-  once the account is resolved. Result bodies already produced
+  (insufficient credits / inactive subscription / the API key's
+  credit cap reached). No new tasks are picked up;
+  `failure_reason` and `failure_detail` carry the cause.
+  Re-runnable once the account or cap is resolved. Result bodies already produced
   are kept.
 - `deleted` — caller called
   `DELETE /v1/jobs/{id}/runs/{run_id}`. The run's result
   bodies and data are being deleted; once complete the run
   disappears.
+
+Clients must accept values not listed here.
+
+<a id="TaskStatus"></a>
+
+## TaskStatus Objects
+
+```python
+class TaskStatus(Enum)
+```
+
+Clients must accept values not listed here.
 
 <a id="ResultType"></a>
 
@@ -1970,6 +1996,8 @@ class ResultType(Enum)
 ```
 
 Body format of a successful task result; matches the job's `format` 1:1.
+
+Clients must accept values not listed here.
 
 <a id="Format"></a>
 
@@ -1987,6 +2015,8 @@ Precedence:
   - otherwise → `html`.
 Stamped on every successful task result and used to set the
 right `Content-Type` when you fetch the content.
+
+Clients must accept values not listed here.
 
 <a id="Method"></a>
 
@@ -2196,6 +2226,8 @@ task row is visible. Omitted on runs whose tasks were
 written on the request path (201 submissions and
 reruns, `addTasks` batches).
 
+Clients must accept values not listed here.
+
 <a id="FailureReason"></a>
 
 ## FailureReason Objects
@@ -2205,10 +2237,16 @@ class FailureReason(Enum)
 ```
 
 Present only when `status == failed`: the account-level
-cause of the auto-fail. `insufficient_credits` (out of
-credits) or `subscription_inactive` (subscription not
-active). Omitted otherwise. Distinct from
+cause of the auto-fail. Omitted otherwise. Distinct from
 `stats.failure_reasons` (the per-task rollup).
+- `insufficient_credits` — the account is out of credits.
+- `subscription_inactive` — the subscription is not active.
+- `api_key_cap_reached` — the job's API key reached one of
+  its credit caps (day, week, month or billing period).
+  Resolves on its own when that cap's window resets, or
+  when the cap is raised.
+
+Clients must accept values not listed here.
 
 <a id="Run"></a>
 
@@ -2247,15 +2285,33 @@ task row is visible. Omitted on runs whose tasks were
 written on the request path (201 submissions and
 reruns, `addTasks` batches).
 
+Clients must accept values not listed here.
+
 <a id="Run.failure_reason"></a>
 
 #### failure\_reason
 
 Present only when `status == failed`: the account-level
-cause of the auto-fail. `insufficient_credits` (out of
-credits) or `subscription_inactive` (subscription not
-active). Omitted otherwise. Distinct from
+cause of the auto-fail. Omitted otherwise. Distinct from
 `stats.failure_reasons` (the per-task rollup).
+- `insufficient_credits` — the account is out of credits.
+- `subscription_inactive` — the subscription is not active.
+- `api_key_cap_reached` — the job's API key reached one of
+  its credit caps (day, week, month or billing period).
+  Resolves on its own when that cap's window resets, or
+  when the cap is raised.
+
+Clients must accept values not listed here.
+
+<a id="Run.failure_detail"></a>
+
+#### failure\_detail
+
+Human-readable explanation of `failure_reason`, e.g. which
+cap was reached and when it resets. Present only when
+`failure_reason` is. At most 500 characters (Unicode code
+points); longer upstream text is cut. Free text for display:
+branch on `failure_reason`, never on this string.
 
 <a id="ScheduleRate"></a>
 
@@ -2329,6 +2385,58 @@ with the org's active HMAC key
 input is `t + "." + raw_body`, HMAC-SHA256. When `false`,
 deliveries carry **no** `X-Signature` header — header
 absence is the signal.
+
+<a id="WebhookEventType"></a>
+
+## WebhookEventType Objects
+
+```python
+class WebhookEventType(Enum)
+```
+
+`event_type` of a webhook delivery (see `WebhookEvent`).
+- `run.completed` — the run finished naturally.
+- `run.failed` — the run auto-failed on an account-level
+  error; `failure_reason` and `failure_detail` carry the cause.
+- `webhook.test` — synthetic delivery from `POST /v1/webhook/test`.
+
+Clients must accept values not listed here.
+
+<a id="FailureReason1"></a>
+
+## FailureReason1 Objects
+
+```python
+class FailureReason1(Enum)
+```
+
+`run.failed` only. Same vocabulary as `Run.failure_reason`.
+Clients must accept values not listed here.
+
+<a id="WebhookEvent"></a>
+
+## WebhookEvent Objects
+
+```python
+class WebhookEvent(BaseModel)
+```
+
+Body POSTed to the configured webhook URL (`WebhookConfig`).
+
+<a id="WebhookEvent.failure_reason"></a>
+
+#### failure\_reason
+
+`run.failed` only. Same vocabulary as `Run.failure_reason`.
+Clients must accept values not listed here.
+
+<a id="WebhookEvent.failure_detail"></a>
+
+#### failure\_detail
+
+`run.failed` only, present when `failure_reason` is. Same as
+`Run.failure_detail`: at most 500 characters (Unicode code
+points).
 
 <a id="TestWebhookRequest"></a>
 
@@ -2612,6 +2720,16 @@ class HMACKeyFinalized(BaseModel)
 
 Response to `/rotate/finalize`. No secret.
 
+<a id="Reason"></a>
+
+## Reason Objects
+
+```python
+class Reason(Enum)
+```
+
+Clients must accept values not listed here.
+
 <a id="InvalidTask"></a>
 
 ## InvalidTask Objects
@@ -2619,6 +2737,12 @@ Response to `/rotate/finalize`. No secret.
 ```python
 class InvalidTask(BaseModel)
 ```
+
+<a id="InvalidTask.reason"></a>
+
+#### reason
+
+Clients must accept values not listed here.
 
 <a id="InvalidTask.value"></a>
 
@@ -2639,6 +2763,14 @@ class Problem(BaseModel)
 
 RFC 7807 Problem Details.
 
+<a id="Problem.code"></a>
+
+#### code
+
+Stable machine-readable error code, e.g. `payment_required`
+or `api_key_cap_reached`. Branch on this, not on `detail`.
+Clients must accept values not listed here.
+
 <a id="Problem.invalid_tasks"></a>
 
 #### invalid\_tasks
@@ -2658,6 +2790,8 @@ Lifecycle state of a results export.
 * `running` — the zip is being produced.
 * `completed` — `download_url` will be present.
 * `failed`   — `error` carries the reason.
+
+Clients must accept values not listed here.
 
 <a id="StartExportResponse"></a>
 

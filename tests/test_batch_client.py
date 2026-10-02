@@ -752,6 +752,70 @@ def test_wait_for_ingest_timeout_raises(client: ZenRowsBatchClient):
         client.job("J").wait_for_ingest(timeout=0.05, poll_interval=0.01)
 
 
+def _failed_run_json() -> dict:
+    run = _ingest_run_json(None, status="failed")
+    run["failure_reason"] = "api_key_cap_reached"
+    run["failure_detail"] = "API key reached its credit cap"
+    return run
+
+
+@respx.mock
+def test_wait_for_run_returns_failed_run(client: ZenRowsBatchClient):
+    """A run the API auto-fails (here: the key's credit cap) is
+    terminal — the waiter returns it with its failure fields instead
+    of polling until `timeout`."""
+    route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_ingest_run_json(None)),
+            Response(200, json=_failed_run_json()),
+        ]
+    )
+
+    run = client.wait_for_run("J", run_id="R", timeout=0.5, poll_interval=0.01)
+
+    assert route.call_count == 2
+    assert run.status.value == "failed"
+    assert run.failure_reason.value == "api_key_cap_reached"
+    assert run.failure_detail == "API key reached its credit cap"
+
+
+@respx.mock
+def test_run_handle_wait_returns_failed_run(client: ZenRowsBatchClient):
+    """Same contract through `run.wait()` on a handle."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_ingest_run_json(None)),
+            Response(200, json=_failed_run_json()),
+        ]
+    )
+
+    out = client.run("J", "R").wait(timeout=0.5, poll_interval=0.01)
+
+    assert out.data.status.value == "failed"
+    assert out.data.failure_reason.value == "api_key_cap_reached"
+    assert out.data.failure_detail == "API key reached its credit cap"
+
+
+@respx.mock
+def test_wait_for_run_failure_statuses_raises_on_failed(client: ZenRowsBatchClient):
+    """Naming `failed` in `failure_statuses` raises even though it is
+    also a default target — the caller's opt-in wins."""
+    from zenrows.batch import WaiterError
+
+    respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_ingest_run_json(None)),
+            Response(200, json=_failed_run_json()),
+        ]
+    )
+
+    with pytest.raises(WaiterError) as exc:
+        client.wait_for_run(
+            "J", run_id="R", failure_statuses={"failed"}, timeout=0.5, poll_interval=0.01
+        )
+    assert not isinstance(exc.value, WaiterTimeout)
+
+
 @respx.mock
 def test_job_handle_is_get_free(client: ZenRowsBatchClient):
     """`client.job(id)` mints a handle with no network call; acting on it
