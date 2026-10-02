@@ -1,4 +1,4 @@
-.PHONY: install sync test lint format typecheck check generate docs clean build
+.PHONY: install sync test lint format typecheck check generate docs clean build bump release
 
 # Bootstrap: install + dev deps, build the local venv.
 install sync:
@@ -73,3 +73,21 @@ clean:
 # Build wheel + sdist via hatchling.
 build:
 	uv build
+
+# Bump the version (pyproject.toml + src/zenrows/__version__.py) and relock.
+# PART defaults to patch; pass PART=minor, PART=major, or an explicit X.Y.Z.
+# Local-only: stages the change but does not commit, push, or tag.
+PART ?= patch
+bump:
+	uv run python scripts/bump_version.py $(PART)
+	uv lock
+	git add pyproject.toml src/zenrows/__version__.py uv.lock
+
+# Bump, commit, push to main, and cut the GitHub release that triggers the
+# PyPI publish workflow (.github/workflows/release.yml). Pushes to main and
+# publishes a public release — confirm the diff before running this.
+release: bump
+	$(eval NEW_VERSION := $(shell grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/'))
+	git commit -m "chore: bump version to $(NEW_VERSION)"
+	git push origin main
+	gh release create "v$(NEW_VERSION)" --title "v$(NEW_VERSION)" --generate-notes
