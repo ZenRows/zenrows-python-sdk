@@ -112,5 +112,9 @@ exclude = ["src/zenrows/batch/models.py"]
 # --- pytest ---
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# e2e tests hit a live API; `make test-e2e` selects them with `-m e2e`.
+addopts = "-ra --strict-markers -m 'not e2e'"
 asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests against a live ZenRows API (opt-in, see DEVELOPMENT.md)",
+]
