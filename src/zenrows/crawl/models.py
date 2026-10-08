@@ -1,10 +1,8 @@
 """Pydantic v2 models for the Crawl API's responses.
 
-Hand-written, unlike Batch's generated `models.py`: the surface is a
-handful of small schemas, so a second codegen pipeline would cost more
-than it saves.
+Hand-written: the surface is a handful of small schemas.
 
-Forward compatibility follows Batch's rules. Unknown response fields
+Forward compatible: unknown response fields
 are ignored (pydantic's default), and every enum is open: a value the
 server adds later parses as an `UNKNOWN` member that keeps the raw
 value (see `zenrows.batch._open_enum`).

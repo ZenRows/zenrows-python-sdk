@@ -25,8 +25,8 @@ pytestmark = [
 ]
 
 START_URL = "https://www.scrapingcourse.com/ecommerce/"
-# Every account shares a small number of active crawl + Batch job slots,
-# so a create can meet 429 too_many_crawls while other runs finish.
+# An account can run only a few crawls at once, so a create can meet
+# 429 too_many_crawls while other runs finish.
 SLOT_WAIT_SECONDS = 300
 
 

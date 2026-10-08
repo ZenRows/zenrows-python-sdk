@@ -12,8 +12,8 @@ grow as pages finish.
     for result in client.iter_results(crawl.crawl_id):
         print(result.url)
 
-Transport (auth header, retries, problem+json mapping) is Batch's
-`_Transport`, raising `CrawlAPIError` instead of `BatchAPIError`.
+Requests go through the SDK's shared HTTP transport (auth header,
+retries, problem+json mapping), which raises `CrawlAPIError`.
 """
 
 import json
@@ -135,8 +135,9 @@ class ZenRowsCrawlClient:
         - `idempotency_key`: a retry with the same key and body answers
           with the crawl the first request created.
 
-        Only the arguments you pass are sent. An account at its limit
-        of active crawls and Batch jobs gets 429 `too_many_crawls`.
+        Only the arguments you pass are sent. An account with too many
+        crawls running gets 429 `too_many_crawls`; retry after the
+        error's `retry_after` seconds.
         """
         if output_format not in (None, "html"):
             raise ValueError(f"create: output_format must be 'html' or None, not {output_format!r}")
