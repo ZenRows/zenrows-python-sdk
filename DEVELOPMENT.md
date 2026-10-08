@@ -19,14 +19,19 @@ Makefile targets below.
 
 ```
 src/zenrows/
-├── __init__.py               # re-exports both clients
+├── __init__.py               # re-exports the clients
 ├── client.py                 # ZenRowsClient (legacy sync scraper)
-└── batch/
-    ├── __init__.py           # ZenRowsBatchClient + key models
+├── batch/
+│   ├── __init__.py           # ZenRowsBatchClient + key models
+│   ├── client.py             # hand-written typed facade
+│   ├── _transport.py         # httpx wrapper, RFC 7807 → exceptions
+│   ├── errors.py             # BatchAPIError, ProblemDetail
+│   └── models.py             # GENERATED — pydantic v2 (do not edit)
+└── crawl/
+    ├── __init__.py           # ZenRowsCrawlClient + models
     ├── client.py             # hand-written typed facade
-    ├── _transport.py         # httpx wrapper, RFC 7807 → exceptions
-    ├── errors.py             # BatchAPIError, ProblemDetail
-    └── models.py             # GENERATED — pydantic v2 (do not edit)
+    ├── errors.py             # CrawlAPIError
+    └── models.py             # hand-written pydantic v2 models
 ```
 
 The Batch SDK is split deliberately:
@@ -42,12 +47,21 @@ This way the wire types stay in lockstep with the OpenAPI document
 while the ergonomic surface (method names, helpers, retries, URL
 override) stays in our control.
 
+The Crawl client uses the shared HTTP transport (`_transport.py`: key
+header, retries, problem+json) with `CrawlAPIError.from_response` as
+its error mapping, and the shared `poll_until` loop. Its models are
+hand-written: the surface is a few small schemas, so there is no Crawl
+codegen step.
+Keep them tolerant: unknown fields are ignored, and every response enum
+gets `_missing_ = classmethod(open_enum_missing)`.
+
 ## Common tasks
 
 | Make target     | What it does |
 |-----------------|--------------|
 | `make sync`     | `uv sync --all-extras` |
-| `make test`     | `uv run pytest` |
+| `make test`     | `uv run pytest` (offline; e2e tests deselected) |
+| `make test-e2e` | End-to-end tests against a live API (see below) |
 | `make check`    | `ty check` + `ruff check` + `ruff format --check` (CI mode) |
 | `make typecheck`| `ty check src` (static types; `models.py` excluded) |
 | `make lint`     | `ruff check --fix` |
@@ -55,6 +69,37 @@ override) stays in our control.
 | `make generate` | Re-emit `src/zenrows/batch/models.py` from `docs/openapi.yaml` |
 | `make build`    | Build wheel + sdist via hatchling |
 | `make clean`    | Drop caches + build outputs |
+
+## Running the Crawl e2e test
+
+`tests/e2e/test_crawl_e2e.py` drives a real crawl through the client:
+create (with `include_patterns`, `output_format="html"`), wait, read the
+results, one page and the NDJSON download, list, stop, and a 404. It
+costs a few credits. It is marked `e2e`, which `make test` deselects,
+and it skips unless the three required variables below are set.
+
+| Variable | |
+|---|---|
+| `ZENROWS_API_KEY` | required: a key with Crawl access |
+| `ZENROWS_CRAWL_BASE_URL` | required: the API base, e.g. `https://api.zenrows.com/v1` |
+| `ZENROWS_E2E_CRAWL_URL` | required: the page the crawl starts from |
+| `ZENROWS_E2E_CRAWL_INCLUDE` | optional: an include pattern; every result must contain it |
+
+```bash
+export ZENROWS_API_KEY=zr_...                       # a key with Crawl access
+export ZENROWS_CRAWL_BASE_URL=https://api.zenrows.com/v1
+export ZENROWS_E2E_CRAWL_URL=https://example.com/products/
+export ZENROWS_E2E_CRAWL_INCLUDE=/product/          # optional
+make test-e2e
+```
+
+Pick a start page whose links include a few pages matching the pattern:
+the test crawls at depth 1 with `max_items=3` and `output_format="html"`.
+
+To test against a local or staging deployment, point
+`ZENROWS_CRAWL_BASE_URL` at its `/v1` base instead. When the account
+has too many crawls running (429 `too_many_crawls`), the test waits and
+retries (up to 5 minutes) before creating its crawl.
 
 ## Refreshing the OpenAPI spec
 
