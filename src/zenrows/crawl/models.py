@@ -1,8 +1,7 @@
 """Pydantic v2 models for the Crawl API's responses.
 
 Hand-written, unlike Batch's generated `models.py`: the surface is a
-handful of small schemas, and the SDK exposes only part of the API (see
-the package docstring), so a second codegen pipeline would cost more
+handful of small schemas, so a second codegen pipeline would cost more
 than it saves.
 
 Forward compatibility follows Batch's rules. Unknown response fields

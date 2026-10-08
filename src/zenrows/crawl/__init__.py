@@ -6,8 +6,8 @@ What's where:
   - `models` — hand-written pydantic v2 response models with open enums.
   - `errors.CrawlAPIError` — RFC 9457 problem+json mapping.
 
-Crawl is in beta. This release supports link discovery with URL-only
-or HTML output. JSON output and pagination discovery are not exposed.
+`create(output_format="html")` also returns each kept URL's page;
+without it a crawl returns URLs only.
 """
 
 from zenrows.batch._waiters import WaiterTimeout
