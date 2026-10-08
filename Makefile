@@ -1,12 +1,17 @@
-.PHONY: install sync test lint format typecheck check generate docs clean build bump release
+.PHONY: install sync test test-e2e lint format typecheck check generate docs clean build bump release
 
 # Bootstrap: install + dev deps, build the local venv.
 install sync:
 	uv sync --all-extras
 
-# Run the suite.
+# Run the suite (offline; e2e tests are deselected).
 test:
 	uv run pytest
+
+# Run the end-to-end tests against a live API. Needs ZENROWS_API_KEY,
+# ZENROWS_CRAWL_BASE_URL and ZENROWS_E2E_CRAWL_URL; see DEVELOPMENT.md.
+test-e2e:
+	uv run pytest -m e2e -s tests/e2e
 
 # Static type check (ty — Astral). Shipped surface only; tests are
 # covered by the suite. Generated models.py is excluded in pyproject.

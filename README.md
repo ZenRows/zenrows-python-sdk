@@ -10,7 +10,7 @@
 SDK to access [Zenrows](https://www.zenrows.com/) APIs directly from Python.
 Zenrows handles proxies rotation, headless browsers, and CAPTCHAs for you.
 
-This package ships two clients:
+This package ships three clients:
 
   - **`ZenRowsClient`** — the original synchronous scraping client.
     One URL in, one HTML/JSON response out. Best for ad-hoc scraping.
@@ -18,6 +18,9 @@ This package ships two clients:
     thousands of URLs as one job, poll for results, optionally upload a
     CSV of URLs in one call. Best for offline / bulk pipelines.
     _(Private beta — [contact support](mailto:support@zenrows.com) for access.)_
+  - **`ZenRowsCrawlClient`** — the Crawl API client. Give it one start
+    URL; it follows links and returns the URLs (and, optionally, the
+    pages) it finds behind it.
 
 ## Table of Contents
 
@@ -37,6 +40,10 @@ This package ships two clients:
   - [Act on an id without a GET](#act-on-an-id-without-a-get)
   - [Scheduled jobs & webhooks](#scheduled-jobs--webhooks)
   - [Error handling](#error-handling)
+- [Quickstart — Crawl API (`ZenRowsCrawlClient`)](#quickstart--crawl-api-zenrowscrawlclient)
+  - [Read the pages](#read-the-pages)
+  - [List and stop crawls](#list-and-stop-crawls)
+  - [Crawl errors](#crawl-errors)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -484,6 +491,95 @@ parse such runs, so upgrade before enabling API key credit caps with Batch.
 The full Batch surface (jobs, runs, tasks, results, content, history,
 file_inputs, HMAC keys) is reachable via methods on `ZenRowsBatchClient`.
 See `src/zenrows/batch/client.py` or `help(ZenRowsBatchClient)`.
+
+## Quickstart — Crawl API (`ZenRowsCrawlClient`)
+
+A crawl starts from one URL, follows the links on each page up to
+`depth` hops, and keeps the URLs that match your patterns, up to
+`max_items`. It runs in the background: `create` returns at once with
+`status="running"`, and `wait` blocks until it ends. Without
+`output_format` a crawl returns URLs only; `output_format="html"` also
+returns each kept URL's page.
+
+```python
+import os
+from zenrows import ZenRowsCrawlClient
+
+client = ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])
+
+crawl = client.create(
+    "https://example.com/products/",
+    depth=1,                         # link hops from the start URL
+    max_items=50,                    # stop after keeping 50 URLs (default 10)
+    max_pages=100,                   # stop after fetching 100 pages (default 10)
+    include_patterns=["/product/"],  # keep only URLs containing this
+)
+crawl = client.wait(crawl.crawl_id, timeout=600)   # Crawl, terminal
+print(crawl.status.value, crawl.stop_reason, crawl.coverage)
+
+for result in client.iter_results(crawl.crawl_id):  # follows next_cursor
+    print(result.url)
+```
+
+`wait` returns a `failed` crawl rather than raising (read `crawl.error`),
+and raises `WaiterTimeout` on timeout without stopping the crawl.
+`iter_results` stops when the server's `next_cursor` is null, which happens
+only once the crawl has ended; on a running crawl it follows new results
+live until the crawl ends. `get(crawl_id, cursor=..., limit=...)` returns
+one raw page.
+
+### Read the pages
+
+Pass `output_format="html"` to also fetch the page of every kept URL:
+
+```python
+crawl = client.create(start_url, depth=1, output_format="html")
+client.wait(crawl.crawl_id)
+
+for result in client.iter_results(crawl.crawl_id):
+    if result.content_id:                           # content_status == fetched
+        html = client.get_content(crawl.crawl_id, result)
+
+# Or everything in one NDJSON file: {"url", "content_status", "content"} per line.
+client.download(crawl.crawl_id, "out/crawl.jsonl")
+for line in client.iter_download(crawl.crawl_id):  # streamed, parsed
+    print(line.url, len(line.content or ""))
+```
+
+### List and stop crawls
+
+```python
+for c in client.iter_crawls():          # newest first, without results
+    print(c.crawl_id, c.status.value)
+
+client.stop(crawl_id)                   # idempotent; read final counts with get()
+```
+
+### Crawl errors
+
+Every non-2xx raises `CrawlAPIError`. Branch on `status_code` and `code`:
+
+```python
+from zenrows.crawl import CrawlAPIError
+
+try:
+    client.create(start_url, depth=1)
+except CrawlAPIError as exc:
+    if exc.not_enabled:                 # 403 REQS008
+        print("Crawl is not enabled for this account")
+    elif exc.code == "too_many_crawls": # 429: too many crawls running
+        print("retry in", exc.retry_after, "s")
+    elif exc.code in ("invalid_parameter", "invalid_start_url"):  # 422
+        print(exc.detail)
+    else:
+        raise
+```
+
+`crawl_not_found` / `content_not_found` come with 404. A crawl that
+ended `failed` is not an error response: read `crawl.error.code` and
+`crawl.error.detail` on it. Response enums (`CrawlStatus`, `StopReason`,
+`ContentStatus`, ...) are open: a value added later parses as an
+`UNKNOWN` member that keeps the raw value.
 
 ## Contributing
 Pull requests are welcome. For significant changes, please open an issue first to discuss what you would like to change.
