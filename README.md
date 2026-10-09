@@ -20,7 +20,7 @@ This package ships three clients:
     _(Private beta — [contact support](mailto:support@zenrows.com) for access.)_
   - **`ZenRowsCrawlClient`** — the Crawl API client. Give it one start
     URL; it follows links and returns the URLs (and, optionally, the
-    pages) it finds behind it. _(Beta.)_
+    pages) it finds behind it. _(New.)_
 
 ## Table of Contents
 
@@ -40,7 +40,7 @@ This package ships three clients:
   - [Act on an id without a GET](#act-on-an-id-without-a-get)
   - [Scheduled jobs & webhooks](#scheduled-jobs--webhooks)
   - [Error handling](#error-handling)
-- [Quickstart — Crawl API (beta) (`ZenRowsCrawlClient`)](#quickstart--crawl-api-beta-zenrowscrawlclient)
+- [Quickstart — Crawl API (new) (`ZenRowsCrawlClient`)](#quickstart--crawl-api-new-zenrowscrawlclient)
   - [Read the pages](#read-the-pages)
   - [List and stop crawls](#list-and-stop-crawls)
   - [Crawl errors](#crawl-errors)
@@ -492,9 +492,9 @@ The full Batch surface (jobs, runs, tasks, results, content, history,
 file_inputs, HMAC keys) is reachable via methods on `ZenRowsBatchClient`.
 See `src/zenrows/batch/client.py` or `help(ZenRowsBatchClient)`.
 
-## Quickstart — Crawl API (beta) (`ZenRowsCrawlClient`)
+## Quickstart — Crawl API (new) (`ZenRowsCrawlClient`)
 
-Crawl is in Beta: its API may still change.
+Crawl is still evolving: new features are coming, limits may be tuned, and the changelog announces each change.
 
 A crawl starts from one URL, follows the links on each page up to
 `depth` hops, and keeps the URLs that match your patterns, up to

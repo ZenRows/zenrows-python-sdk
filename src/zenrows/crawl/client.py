@@ -1,4 +1,4 @@
-"""ZenRowsCrawlClient — the typed facade over the Crawl API (Beta).
+"""ZenRowsCrawlClient — the typed facade over the Crawl API (New).
 
 A crawl starts from one URL, follows links up to `depth` hops, and
 keeps the URLs that match its patterns, up to `max_items`. It runs as
@@ -90,7 +90,7 @@ class CrawlDownload:
 
 
 class ZenRowsCrawlClient:
-    """Synchronous, typed client for the ZenRows Crawl API (Beta).
+    """Synchronous, typed client for the ZenRows Crawl API (New).
 
     `api_key` is required:
 
