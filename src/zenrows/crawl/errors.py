@@ -20,8 +20,8 @@ class CrawlAPIError(Exception):
     `code` is the problem's `code` member: `crawl_not_found`,
     `content_not_found`, `invalid_parameter`, `too_many_crawls`, ...,
     `REQS008` when Crawl is not enabled for the account, and the API's
-    usual auth and credit codes. `problem`
-    holds the whole body, or None when it was not JSON.
+    usual auth and credit codes; None when the body has no code.
+    `problem` holds the whole body, or None when it was not JSON.
     """
 
     def __init__(
@@ -38,14 +38,15 @@ class CrawlAPIError(Exception):
         self.retry_after = retry_after
         self.problem = problem
         self.raw = raw
-        self.code: str = problem.code if problem else "internal"
+        self.code: str | None = problem.code if problem else None
         self.detail: str | None = problem.detail if problem else None
         if problem and self.code == CRAWL_NOT_ENABLED:
             msg = f"{status_code} Crawl is not enabled for this account ({CRAWL_NOT_ENABLED})" + (
                 f": {problem.detail}" if problem.detail else ""
             )
         elif problem:
-            msg = f"{status_code} {problem.title}: {problem.detail or problem.code}"
+            reason = problem.detail or problem.code
+            msg = f"{status_code} {problem.title}" + (f": {reason}" if reason else "")
         else:
             msg = f"{status_code} (no problem body)"
         super().__init__(msg)

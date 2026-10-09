@@ -81,7 +81,7 @@ and it skips unless the three required variables below are set.
 | Variable | |
 |---|---|
 | `ZENROWS_API_KEY` | required: a key with Crawl access |
-| `ZENROWS_CRAWL_BASE_URL` | required: the API base, e.g. `https://api.zenrows.com/v1` |
+| `ZENROWS_CRAWL_BASE_URL` | required: the API base, e.g. `https://api.zenrows.com/v1`; the test passes it as `base_url=` |
 | `ZENROWS_E2E_CRAWL_URL` | required: the page the crawl starts from |
 | `ZENROWS_E2E_CRAWL_INCLUDE` | optional: an include pattern; every result must contain it |
 
@@ -98,8 +98,9 @@ the test crawls at depth 1 with `max_items=3` and `output_format="html"`.
 
 To test against a local or staging deployment, point
 `ZENROWS_CRAWL_BASE_URL` at its `/v1` base instead. When the account
-has too many crawls running (429 `too_many_crawls`), the test waits and
-retries (up to 5 minutes) before creating its crawl.
+has reached its limit of active jobs (429 `too_many_crawls`: 3 by default,
+shared with its Batch jobs), the test waits and retries (up to 5 minutes)
+before creating its crawl.
 
 ## Refreshing the OpenAPI spec
 

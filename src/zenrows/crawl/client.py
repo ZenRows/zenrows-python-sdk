@@ -1,4 +1,4 @@
-"""ZenRowsCrawlClient — the typed facade over the Crawl API.
+"""ZenRowsCrawlClient — the typed facade over the Crawl API (Beta).
 
 A crawl starts from one URL, follows links up to `depth` hops, and
 keeps the URLs that match its patterns, up to `max_items`. It runs as
@@ -18,16 +18,16 @@ retries, problem+json mapping), which raises `CrawlAPIError`.
 
 import json
 import logging
-import os
-import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 
 from zenrows.__version__ import __version__
-from zenrows.batch._transport import _Transport
+from zenrows.batch._transport import _RETRYABLE_STATUSES, _Transport
 from zenrows.batch._waiters import poll_until
 from zenrows.crawl.errors import CrawlAPIError
 from zenrows.crawl.models import (
@@ -40,16 +40,59 @@ from zenrows.crawl.models import (
     DownloadLine,
 )
 
-# Production endpoint. The `base_url=` kwarg + `ZENROWS_CRAWL_BASE_URL`
-# env var are present for advanced use only.
 DEFAULT_BASE_URL = "https://api.zenrows.com/v1"
 DEFAULT_USER_AGENT = f"zenrows-crawl-python/{__version__}"
 
 _log = logging.getLogger("zenrows.crawl.transport")
 
+# 429 `too_many_crawls` is a capacity limit, not a transient failure.
+_CREATE_RETRY_STATUSES = _RETRYABLE_STATUSES - {429}
+
+
+class CrawlDownload:
+    """A crawl's NDJSON download, open and ready to read.
+
+    `status` is the crawl's status when the file was read
+    (`X-Crawl-Status`): `running` means the file holds only what the
+    crawl has kept so far. Iterate it once for the parsed lines; the
+    connection closes when the iteration ends. Use it as a context
+    manager to close it without reading to the end.
+    """
+
+    def __init__(self, response: httpx.Response, close: Callable[[], None]):
+        self.status: CrawlStatus | None = _crawl_status(response)
+        self._response = response
+        self._close = close
+
+    def __iter__(self) -> Iterator[DownloadLine]:
+        try:
+            for line in self._response.iter_lines():
+                if line.strip():
+                    yield DownloadLine.model_validate_json(line)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        self._close()
+
+    def __enter__(self) -> "CrawlDownload":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+@dataclass(slots=True, frozen=True)
+class CrawlDownloadFile:
+    """A crawl's NDJSON download, saved to `path`. `status` is as on
+    `CrawlDownload`."""
+
+    path: Path
+    status: CrawlStatus | None
+
 
 class ZenRowsCrawlClient:
-    """Synchronous, typed client for the ZenRows Crawl API.
+    """Synchronous, typed client for the ZenRows Crawl API (Beta).
 
     `api_key` is required:
 
@@ -71,16 +114,16 @@ class ZenRowsCrawlClient:
         user_agent: str = DEFAULT_USER_AGENT,
         httpx_args: dict[str, Any] | None = None,
     ):
-        """`retries` bounds automatic retries of transient failures
-        (HTTP 429/502/503/504 and network errors) on idempotent
-        requests — GETs, and a `create` that carries an
-        `idempotency_key`. Retries use jittered exponential backoff and
-        honor `Retry-After`; set `retries=0` to disable."""
+        """`base_url` defaults to `DEFAULT_BASE_URL`. `retries` bounds
+        automatic retries of transient failures (HTTP 429/502/503/504
+        and network errors) on idempotent requests — GETs, and a
+        `create` that carries an `idempotency_key` (never on 429 for
+        `create`). Retries use jittered exponential backoff and honor
+        `Retry-After`; set `retries=0` to disable."""
         if not api_key:
             raise ValueError("ZenRowsCrawlClient: api_key is required.")
-        base_url = base_url or os.environ.get("ZENROWS_CRAWL_BASE_URL") or DEFAULT_BASE_URL
         self._t = _Transport(
-            base_url=base_url,
+            base_url=base_url or DEFAULT_BASE_URL,
             api_key=api_key,
             user_agent=user_agent,
             timeout=timeout,
@@ -129,15 +172,17 @@ class ZenRowsCrawlClient:
           bounds the cost (server default 10).
         - `include_patterns` / `exclude_patterns`: substrings matched
           against each normalized URL. A URL is kept when it matches
-          an include pattern (if any) and no exclude pattern.
+          an include pattern (if any) and no exclude pattern. A crawl
+          stays on the start URL's registrable domain; subdomains count.
         - `output_format="html"`: also fetch every kept URL's page,
           readable with `get_content` / `download`. Omit for URLs only.
         - `idempotency_key`: a retry with the same key and body answers
           with the crawl the first request created.
 
-        Only the arguments you pass are sent. An account with too many
-        crawls running gets 429 `too_many_crawls`; retry after the
-        error's `retry_after` seconds.
+        Only the arguments you pass are sent. When the account has
+        reached its limit of active jobs (3 by default), shared with its
+        Batch jobs, `create` raises 429 `too_many_crawls` without
+        retrying; retry after the error's `retry_after` seconds.
         """
         if output_format not in (None, "html"):
             raise ValueError(f"create: output_format must be 'html' or None, not {output_format!r}")
@@ -154,7 +199,11 @@ class ZenRowsCrawlClient:
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         response = self._t.request(
-            "POST", "/crawls", headers=headers, content=json.dumps(body).encode("utf-8")
+            "POST",
+            "/crawls",
+            headers=headers,
+            content=json.dumps(body).encode("utf-8"),
+            retry_statuses=_CREATE_RETRY_STATUSES,
         )
         return Crawl.model_validate(response.json())
 
@@ -203,25 +252,20 @@ class ZenRowsCrawlClient:
         crawl_id: str,
         *,
         page_size: int | None = None,
-        poll_interval: float = 2.0,
     ) -> Iterator[CrawlResult]:
-        """Yield every URL the crawl keeps, in order, each once.
+        """Yield the URLs the crawl has kept, in order, each once.
 
-        Follows `next_cursor` until the server returns null, which it
-        does only once the crawl has ended and its last page was read.
-        On a crawl that is still running, the iterator follows it live:
-        when it has caught up, it sleeps `poll_interval` seconds and
-        asks again with the same cursor, so it ends when the crawl ends.
-        Call `wait` first to read a finished crawl without polling.
+        Follows `next_cursor` and returns at the first empty page or
+        null cursor. It does not poll: on a running crawl it yields
+        only what the crawl has kept so far. Call `wait` first to read
+        every result.
         """
         cursor: str | None = None
         while True:
             page = self.get(crawl_id, cursor=cursor, limit=page_size)
             yield from page.results
-            if page.next_cursor is None:
+            if not page.results or page.next_cursor is None:
                 return
-            if not page.results and page.status is CrawlStatus.RUNNING:
-                time.sleep(poll_interval)
             cursor = page.next_cursor
 
     def stop(self, crawl_id: str) -> CrawlStop:
@@ -255,18 +299,18 @@ class ZenRowsCrawlClient:
             content_id = content
         return self._t.request("GET", f"/crawls/{crawl_id}/contents/{content_id}").text
 
-    def iter_download(self, crawl_id: str) -> Iterator[DownloadLine]:
-        """`GET /crawls/{crawl_id}/download` — stream every result as
-        a parsed `DownloadLine` (url, content_status, content).
+    def iter_download(self, crawl_id: str) -> CrawlDownload:
+        """`GET /crawls/{crawl_id}/download` — open the NDJSON file and
+        return it as a `CrawlDownload`: iterate it for parsed
+        `DownloadLine`s (url, content_status, content), and read its
+        `status`.
 
         On a running crawl the file holds what the crawl has kept so
-        far (a warning is logged); call `wait` first for the whole of it.
+        far, and `status` is `running`; call `wait` first for all of it.
         """
-        with self._t.stream("GET", f"/crawls/{crawl_id}/download") as response:
-            _warn_if_partial(crawl_id, response)
-            for line in response.iter_lines():
-                if line.strip():
-                    yield DownloadLine.model_validate_json(line)
+        stack = ExitStack()
+        response = stack.enter_context(self._t.stream("GET", f"/crawls/{crawl_id}/download"))
+        return CrawlDownload(response, stack.close)
 
     def download(
         self,
@@ -274,21 +318,23 @@ class ZenRowsCrawlClient:
         target_path: str | Path,
         *,
         chunk_size: int = 64 * 1024,
-    ) -> Path:
+    ) -> CrawlDownloadFile:
         """`GET /crawls/{crawl_id}/download` — stream the NDJSON file
-        (one JSON object per result) to `target_path`, and return it.
+        (one JSON object per result) to `target_path`. Returns its
+        `path` and the crawl's `status` when the file was read.
 
         On a running crawl the file holds what the crawl has kept so
-        far (a warning is logged); call `wait` first for the whole of it.
+        far, and `status` is `running`; call `wait` first for all of it.
         """
         target = Path(target_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        with self._t.stream("GET", f"/crawls/{crawl_id}/download") as response:
-            _warn_if_partial(crawl_id, response)
-            with target.open("wb") as f:
-                for chunk in response.iter_bytes(chunk_size):
-                    f.write(chunk)
-        return target
+        with (
+            self._t.stream("GET", f"/crawls/{crawl_id}/download") as response,
+            target.open("wb") as f,
+        ):
+            for chunk in response.iter_bytes(chunk_size):
+                f.write(chunk)
+        return CrawlDownloadFile(path=target, status=_crawl_status(response))
 
     # ===== waiter =====
 
@@ -296,7 +342,7 @@ class ZenRowsCrawlClient:
         self,
         crawl_id: str,
         *,
-        timeout: float = 300.0,
+        timeout: float = 600.0,
         poll_interval: float = 2.0,
         max_poll_interval: float = 15.0,
     ) -> Crawl:
@@ -323,13 +369,15 @@ class ZenRowsCrawlClient:
         )
 
 
-def _warn_if_partial(crawl_id: str, response: httpx.Response) -> None:
+def _crawl_status(response: httpx.Response) -> CrawlStatus | None:
     status = response.headers.get("X-Crawl-Status")
-    if status == CrawlStatus.RUNNING.value:
-        logging.getLogger("zenrows.crawl.client").warning(
-            "crawl %s is still running: the download holds only the results kept so far",
-            crawl_id,
-        )
+    return CrawlStatus(status) if status else None
 
 
-__all__ = ["DEFAULT_BASE_URL", "DEFAULT_USER_AGENT", "ZenRowsCrawlClient"]
+__all__ = [
+    "DEFAULT_BASE_URL",
+    "DEFAULT_USER_AGENT",
+    "CrawlDownload",
+    "CrawlDownloadFile",
+    "ZenRowsCrawlClient",
+]

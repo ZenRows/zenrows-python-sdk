@@ -30,14 +30,16 @@ pytestmark = [
 
 START_URL = os.environ.get("ZENROWS_E2E_CRAWL_URL", "")
 INCLUDE = os.environ.get("ZENROWS_E2E_CRAWL_INCLUDE") or None
-# An account can run only a few crawls at once, so a create can meet
-# 429 too_many_crawls while other runs finish.
+# An account has a limit of active jobs (3 by default, shared with its
+# Batch jobs), so a create can meet 429 too_many_crawls while others finish.
 SLOT_WAIT_SECONDS = 300
 
 
 @pytest.fixture(scope="module")
 def client():
-    with ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"]) as c:
+    with ZenRowsCrawlClient(
+        api_key=os.environ["ZENROWS_API_KEY"], base_url=os.environ["ZENROWS_CRAWL_BASE_URL"]
+    ) as c:
         yield c
 
 
@@ -86,11 +88,14 @@ def test_crawl_end_to_end(client: ZenRowsCrawlClient, tmp_path):
     print(f"content of {fetched[0].url}: {len(html)} chars")
     assert "<html" in html.lower()
 
-    lines = list(client.iter_download(crawl.crawl_id))
+    download = client.iter_download(crawl.crawl_id)
+    assert download.status is CrawlStatus.COMPLETED
+    lines = list(download)
     print(f"download lines: {len(lines)}")
     assert len(lines) == len(results)
-    target = client.download(crawl.crawl_id, tmp_path / f"{crawl.crawl_id}.jsonl")
-    assert [json.loads(line)["url"] for line in target.read_text().splitlines()] == [
+    saved = client.download(crawl.crawl_id, tmp_path / f"{crawl.crawl_id}.jsonl")
+    assert saved.status is CrawlStatus.COMPLETED
+    assert [json.loads(line)["url"] for line in saved.path.read_text().splitlines()] == [
         line.url for line in lines
     ]
 
