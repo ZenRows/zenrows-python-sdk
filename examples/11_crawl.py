@@ -1,13 +1,14 @@
-"""11: Crawl a site → wait → read URLs and pages.
+"""11: Crawl a site → wait → read URLs and pages. Crawl is in Beta.
 
 Demonstrates the Crawl client (`ZenRowsCrawlClient`):
   - `create(url, depth=..., include_patterns=..., output_format="html")`
     starts a crawl and returns at once, `running`.
   - `wait(crawl_id)` blocks until it ends and returns the final `Crawl`
     (a `failed` crawl is returned, with `error` set).
-  - `iter_results(crawl_id)` pages through every kept URL.
+  - `iter_results(crawl_id)` pages through the kept URLs.
   - `get_content(crawl_id, result)` reads one kept URL's HTML.
-  - `download(crawl_id, path)` saves every result as NDJSON.
+  - `download(crawl_id, path)` saves every result as NDJSON and
+    returns the path and the crawl's status.
 
 Run with:
     export ZENROWS_API_KEY=zr_...
@@ -26,7 +27,9 @@ def main() -> None:
     parser.add_argument("--url", required=True, help="the page to start from")
     parser.add_argument("--depth", type=int, default=1)
     parser.add_argument("--max-items", type=int, default=5)
-    parser.add_argument("--include", action="append", default=["/product/"])
+    parser.add_argument(
+        "--include", action="append", help="keep URLs containing this (default /product/)"
+    )
     parser.add_argument("--out", default="crawl.jsonl")
     args = parser.parse_args()
 
@@ -37,7 +40,7 @@ def main() -> None:
             args.url,
             depth=args.depth,
             max_items=args.max_items,
-            include_patterns=args.include,
+            include_patterns=args.include or ["/product/"],
             output_format="html",
         )
     except CrawlAPIError as exc:
@@ -46,7 +49,7 @@ def main() -> None:
         raise
     print(f"started {crawl.crawl_id}")
 
-    crawl = client.wait(crawl.crawl_id, timeout=600.0)
+    crawl = client.wait(crawl.crawl_id)
     cov = crawl.coverage
     print(
         f"{crawl.crawl_id} {crawl.status.value}: {cov.items_found} URLs kept, "
@@ -62,8 +65,8 @@ def main() -> None:
             html = client.get_content(crawl.crawl_id, result)
             print(f"           {len(html)} chars of HTML")
 
-    path = client.download(crawl.crawl_id, args.out)
-    print(f"wrote {path}")
+    saved = client.download(crawl.crawl_id, args.out)
+    print(f"wrote {saved.path}")
 
 
 if __name__ == "__main__":

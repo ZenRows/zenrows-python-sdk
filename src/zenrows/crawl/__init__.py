@@ -1,4 +1,6 @@
-"""Public surface for the ZenRows Crawl API.
+"""Public surface for the ZenRows Crawl API (Beta).
+
+Crawl is in Beta: its surface may still change.
 
 What's where:
   - `client.ZenRowsCrawlClient` — the typed facade: create, get, list,
@@ -11,7 +13,12 @@ without it a crawl returns URLs only.
 """
 
 from zenrows.batch._waiters import WaiterTimeout
-from zenrows.crawl.client import DEFAULT_BASE_URL, ZenRowsCrawlClient
+from zenrows.crawl.client import (
+    DEFAULT_BASE_URL,
+    CrawlDownload,
+    CrawlDownloadFile,
+    ZenRowsCrawlClient,
+)
 from zenrows.crawl.errors import CRAWL_NOT_ENABLED, CrawlAPIError
 from zenrows.crawl.models import (
     ContentStatus,
@@ -36,6 +43,8 @@ __all__ = [
     "Coverage",
     "Crawl",
     "CrawlAPIError",
+    "CrawlDownload",
+    "CrawlDownloadFile",
     "CrawlErrorCode",
     "CrawlList",
     "CrawlResult",

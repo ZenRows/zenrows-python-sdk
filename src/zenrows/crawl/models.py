@@ -10,6 +10,7 @@ value (see `zenrows.batch._open_enum`).
 
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -172,8 +173,9 @@ class DownloadLine(BaseModel):
 
     url: str
     content_status: ContentStatus | None = None
-    content: str | None = None
-    """The page HTML, present when `content_status` is `fetched`."""
+    content: str | dict[str, Any] | None = None
+    """The page, present when `content_status` is `fetched`: HTML text,
+    or an object for a crawl whose output format returns parsed data."""
 
 
 __all__ = [
