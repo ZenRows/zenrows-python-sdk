@@ -20,7 +20,7 @@ import json
 import os
 
 from zenrows import ZenRowsCrawlClient
-from zenrows.crawl import CrawlAPIError, CrawlStatus
+from zenrows.crawl import CRAWL_NOT_ENABLED_CODE, CrawlAPIError, CrawlStatus
 
 
 def main() -> None:
@@ -45,7 +45,7 @@ def main() -> None:
             output_format="html",
         )
     except CrawlAPIError as exc:
-        if exc.not_enabled:
+        if exc.code == CRAWL_NOT_ENABLED_CODE:
             raise SystemExit("Crawl is not enabled for this account.") from exc
         raise
     print(f"started {crawl.crawl_id}")
@@ -64,12 +64,12 @@ def main() -> None:
     for result in client.results(crawl.crawl_id):
         status = result.content_status.value if result.content_status else "-"
         print(f"  [{status}] {result.url}")
-        if result.content_id:
+        if result.content_url:
             html = client.content(crawl.crawl_id, result)
             print(f"           {len(html)} chars of HTML")
 
     with client.download(crawl.crawl_id) as download, open(args.out, "w") as f:
-        for line in download:
+        for line in download.lines:
             f.write(json.dumps(line.model_dump(mode="json", exclude_none=True)) + "\n")
     print(f"wrote {args.out} (crawl {download.status.value if download.status else '-'})")
 

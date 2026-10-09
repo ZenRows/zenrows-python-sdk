@@ -17,7 +17,7 @@ from zenrows.crawl.client import (
     CrawlDownload,
     ZenRowsCrawlClient,
 )
-from zenrows.crawl.errors import CRAWL_NOT_ENABLED, CrawlAPIError
+from zenrows.crawl.errors import CRAWL_NOT_ENABLED_CODE, CrawlAPIError
 from zenrows.crawl.models import (
     ContentStatus,
     Coverage,
@@ -35,7 +35,7 @@ from zenrows.crawl.models import (
 )
 
 __all__ = [
-    "CRAWL_NOT_ENABLED",
+    "CRAWL_NOT_ENABLED_CODE",
     "DEFAULT_BASE_URL",
     "ContentStatus",
     "Coverage",

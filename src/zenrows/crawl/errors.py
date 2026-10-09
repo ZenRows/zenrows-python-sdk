@@ -11,7 +11,7 @@ from zenrows.batch.errors import ProblemDetail
 
 # The code of the 403 answer to a key whose account does not have
 # Crawl enabled.
-CRAWL_NOT_ENABLED = "REQS008"
+CRAWL_NOT_ENABLED_CODE = "REQS008"
 
 
 class CrawlAPIError(Exception):
@@ -40,8 +40,8 @@ class CrawlAPIError(Exception):
         self.raw = raw
         self.code: str | None = problem.code if problem else None
         self.detail: str | None = problem.detail if problem else None
-        if problem and self.code == CRAWL_NOT_ENABLED:
-            msg = f"{status_code} Crawl is not enabled for this account ({CRAWL_NOT_ENABLED})" + (
+        if problem and self.code == CRAWL_NOT_ENABLED_CODE:
+            msg = f"{status_code} Crawl is not enabled for this account ({self.code})" + (
                 f": {problem.detail}" if problem.detail else ""
             )
         elif problem:
@@ -50,11 +50,6 @@ class CrawlAPIError(Exception):
         else:
             msg = f"{status_code} (no problem body)"
         super().__init__(msg)
-
-    @property
-    def not_enabled(self) -> bool:
-        """True when the account does not have Crawl enabled (403 REQS008)."""
-        return self.status_code == 403 and self.code == CRAWL_NOT_ENABLED
 
     @classmethod
     def from_response(cls, response: httpx.Response) -> "CrawlAPIError":
@@ -70,4 +65,4 @@ class CrawlAPIError(Exception):
         )
 
 
-__all__ = ["CRAWL_NOT_ENABLED", "CrawlAPIError"]
+__all__ = ["CRAWL_NOT_ENABLED_CODE", "CrawlAPIError"]
