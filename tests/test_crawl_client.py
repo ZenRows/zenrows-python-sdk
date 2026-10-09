@@ -3,7 +3,7 @@
 Covers the wire contract with respx: request shapes (path, method, key
 header, bodies carrying only what the caller set), response parsing
 with open enums, problem+json error mapping, the results scanner's
-stop rule, downloads with their status, retries, and the waiter.
+stop rule, downloads with their status, retries, and wait.
 """
 
 import json
@@ -17,13 +17,11 @@ from zenrows.batch._open_enum import is_unknown
 from zenrows.crawl import (
     ContentStatus,
     CrawlAPIError,
-    CrawlDownloadFile,
     CrawlErrorCode,
     CrawlResult,
     CrawlStatus,
     OutputFormat,
     StopReason,
-    WaiterTimeout,
 )
 
 BASE_URL = "http://localhost:9100/v1"
@@ -217,7 +215,7 @@ def test_get_omits_unset_query_params(client: ZenRowsCrawlClient):
 
 
 @respx.mock
-def test_iter_crawls_paginates_until_cursor_absent(client: ZenRowsCrawlClient):
+def test_list_returns_one_page(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls").mock(
         side_effect=[
             Response(200, json={"crawls": [crawl_body(crawl_id="c_2")], "next_cursor": "n1"}),
@@ -225,11 +223,13 @@ def test_iter_crawls_paginates_until_cursor_absent(client: ZenRowsCrawlClient):
         ]
     )
 
-    ids = [c.crawl_id for c in client.iter_crawls(page_size=1)]
+    first = client.list(limit=1)
+    last = client.list(cursor=first.next_cursor, limit=1)
 
-    assert ids == ["c_2", "c_1"]
-    assert route.calls[0].request.url.params["limit"] == "1"
-    assert "cursor" not in route.calls[0].request.url.params
+    assert [c.crawl_id for c in first.crawls] == ["c_2"]
+    assert [c.crawl_id for c in last.crawls] == ["c_1"]
+    assert last.next_cursor is None
+    assert dict(route.calls[0].request.url.params) == {"limit": "1"}
     assert route.calls[1].request.url.params["cursor"] == "n1"
 
 
@@ -258,7 +258,7 @@ def test_stop_posts_without_body(client: ZenRowsCrawlClient):
 
 
 @respx.mock
-def test_iter_results_stops_on_null_cursor(client: ZenRowsCrawlClient):
+def test_results_stops_on_null_cursor(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
         side_effect=[
             Response(200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")),
@@ -271,18 +271,16 @@ def test_iter_results_stops_on_null_cursor(client: ZenRowsCrawlClient):
         ]
     )
 
-    urls = [r.url for r in client.iter_results("c_1")]
+    urls = [r.url for r in client.results("c_1", limit=1)]
 
     assert urls == ["https://a", "https://b"]
     assert route.call_count == 2
-    assert "cursor" not in route.calls[0].request.url.params
+    assert dict(route.calls[0].request.url.params) == {"limit": "1"}
     assert route.calls[1].request.url.params["cursor"] == "k1"
 
 
 @respx.mock
-def test_iter_results_returns_at_first_empty_page_of_running_crawl(
-    client: ZenRowsCrawlClient, no_sleep
-):
+def test_results_returns_at_first_empty_page_of_running_crawl(client: ZenRowsCrawlClient, no_sleep):
     route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
         side_effect=[
             Response(200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")),
@@ -291,7 +289,7 @@ def test_iter_results_returns_at_first_empty_page_of_running_crawl(
         ]
     )
 
-    urls = [r.url for r in client.iter_results("c_1")]
+    urls = [r.url for r in client.results("c_1")]
 
     assert urls == ["https://a"]
     assert route.call_count == 2
@@ -302,7 +300,7 @@ def test_iter_results_returns_at_first_empty_page_of_running_crawl(
 
 
 @respx.mock
-def test_get_content_accepts_result_or_id(client: ZenRowsCrawlClient):
+def test_content_accepts_result_or_id(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls/c_1/contents/ct_a").mock(
         return_value=Response(
             200, headers={"Content-Type": "text/html"}, text="<html>product</html>"
@@ -312,14 +310,14 @@ def test_get_content_accepts_result_or_id(client: ZenRowsCrawlClient):
         url="https://a", content_status="fetched", content_url="/v1/crawls/c_1/contents/ct_a"
     )  # type: ignore[arg-type]
 
-    assert client.get_content("c_1", result) == "<html>product</html>"
-    assert client.get_content("c_1", "ct_a") == "<html>product</html>"
+    assert client.content("c_1", result) == "<html>product</html>"
+    assert client.content("c_1", "ct_a") == "<html>product</html>"
     assert route.call_count == 2
 
 
-def test_get_content_without_content_url_raises(client: ZenRowsCrawlClient):
+def test_content_without_content_url_raises(client: ZenRowsCrawlClient):
     with pytest.raises(ValueError, match="content_url"):
-        client.get_content("c_1", CrawlResult(url="https://a", content_status="pending"))  # type: ignore[arg-type]
+        client.content("c_1", CrawlResult(url="https://a", content_status="pending"))  # type: ignore[arg-type]
 
 
 NDJSON = (
@@ -330,7 +328,7 @@ NDJSON = (
 
 
 @respx.mock
-def test_iter_download_parses_lines_and_status(client: ZenRowsCrawlClient):
+def test_download_parses_lines_and_status(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
         return_value=Response(
             200,
@@ -338,7 +336,7 @@ def test_iter_download_parses_lines_and_status(client: ZenRowsCrawlClient):
             content=NDJSON,
         )
     )
-    download = client.iter_download("c_1")
+    download = client.download("c_1")
     assert download.status is CrawlStatus.COMPLETED
     lines = list(download)
     assert [line.url for line in lines] == ["https://a", "https://b", "https://c"]
@@ -348,29 +346,18 @@ def test_iter_download_parses_lines_and_status(client: ZenRowsCrawlClient):
 
 
 @respx.mock
-def test_iter_download_without_status_header(client: ZenRowsCrawlClient):
+def test_download_without_status_header(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/c_1/download").mock(return_value=Response(200, content=b""))
-    with client.iter_download("c_1") as download:
+    with client.download("c_1") as download:
         assert download.status is None
         assert list(download) == []
-
-
-@respx.mock
-def test_download_writes_file_and_returns_status(client: ZenRowsCrawlClient, tmp_path):
-    respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
-        return_value=Response(200, headers={"X-Crawl-Status": "running"}, content=NDJSON)
-    )
-    target = tmp_path / "out" / "c_1.jsonl"
-    saved = client.download("c_1", target)
-    assert saved == CrawlDownloadFile(path=target, status=CrawlStatus.RUNNING)
-    assert saved.path.read_bytes() == NDJSON
 
 
 @respx.mock
 def test_download_maps_errors(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/nope/download").mock(return_value=problem(404, "crawl_not_found"))
     with pytest.raises(CrawlAPIError) as exc_info:
-        client.iter_download("nope")
+        client.download("nope")
     assert exc_info.value.code == "crawl_not_found"
 
 
@@ -495,7 +482,7 @@ def test_wait_polls_until_terminal(client: ZenRowsCrawlClient, no_sleep):
         ]
     )
 
-    crawl = client.wait("c_1", poll_interval=1.0)
+    crawl = client.wait("c_1")
 
     assert crawl.status is CrawlStatus.COMPLETED
     assert not hasattr(crawl, "results")
@@ -505,12 +492,42 @@ def test_wait_polls_until_terminal(client: ZenRowsCrawlClient, no_sleep):
 
 
 @respx.mock
-def test_wait_times_out(client: ZenRowsCrawlClient, no_sleep, monkeypatch):
-    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+def test_wait_returns_running_crawl_on_timeout(client: ZenRowsCrawlClient, monkeypatch):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
         return_value=Response(200, json=crawl_body(results=[], next_cursor="k"))
     )
-    clock = iter(range(0, 1000, 10))
-    monkeypatch.setattr("zenrows.batch._waiters.time.monotonic", lambda: next(clock))
+    now = [0.0]
+    slept: list[float] = []
 
-    with pytest.raises(WaiterTimeout):
-        client.wait("c_1", timeout=25)
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", sleep)
+
+    crawl = client.wait("c_1", timeout=25)
+
+    assert crawl.status is CrawlStatus.RUNNING
+    assert route.call_count == len(slept) + 1
+    assert sum(slept) == pytest.approx(25)
+    assert max(slept) <= 15.0 * 1.2
+
+
+@respx.mock
+def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200,
+            json=crawl_body(
+                status="failed",
+                error={"code": "no_items_found", "detail": "No URL matched."},
+                results=[],
+                next_cursor=None,
+            ),
+        )
+    )
+    crawl = client.wait("c_1")
+    assert crawl.status is CrawlStatus.FAILED
+    assert crawl.error is not None and crawl.error.code is CrawlErrorCode.NO_ITEMS_FOUND
+    assert no_sleep == []

@@ -517,19 +517,20 @@ crawl = client.create(
     max_pages=100,                   # stop after fetching 100 pages (default 10)
     include_patterns=["/product/"],  # keep only URLs containing this
 )
-crawl = client.wait(crawl.crawl_id)                 # Crawl, terminal (timeout 600 s)
+crawl = client.wait(crawl.crawl_id)            # polls up to timeout=600 s
 print(crawl.status.value, crawl.stop_reason, crawl.coverage)
 
-for result in client.iter_results(crawl.crawl_id):  # follows next_cursor
+for result in client.results(crawl.crawl_id):  # follows next_cursor
     print(result.url)
 ```
 
-`wait` returns a `failed` crawl rather than raising (read `crawl.error`),
-and raises `WaiterTimeout` on timeout without stopping the crawl.
-`iter_results` does not poll: it returns at the first empty page, so on a
+`wait` returns the crawl when it ends, or when `timeout` (seconds,
+default 600) runs out. It does not raise: on timeout the crawl is still
+`running` (call `wait` again, or `stop`), and a `failed` crawl comes
+back with `crawl.error` set. `results` does not poll: it returns at the first empty page, so on a
 running crawl it yields only the URLs kept so far. Call `wait` first to
-read every result. `get(crawl_id, cursor=..., limit=...)` returns one raw
-page.
+read every result. `results(crawl_id, limit=...)` sets the page size of
+each request. `get(crawl_id, cursor=..., limit=...)` returns one raw page.
 
 ### Read the pages
 
@@ -539,28 +540,29 @@ Pass `output_format="html"` to also fetch the page of every kept URL:
 crawl = client.create(start_url, depth=1, output_format="html")
 client.wait(crawl.crawl_id)
 
-for result in client.iter_results(crawl.crawl_id):
-    if result.content_id:                           # content_status == fetched
-        html = client.get_content(crawl.crawl_id, result)
+for result in client.results(crawl.crawl_id):
+    if result.content_id:                        # content_status == fetched
+        html = client.content(crawl.crawl_id, result)
 
 # Or everything in one NDJSON file: {"url", "content_status", "content"} per line.
-saved = client.download(crawl.crawl_id, "out/crawl.jsonl")
-print(saved.path, saved.status)                    # status from X-Crawl-Status
-
-with client.iter_download(crawl.crawl_id) as download:  # streamed, parsed
-    print(download.status)
+with client.download(crawl.crawl_id) as download:  # streamed, parsed
+    print(download.status)                         # from X-Crawl-Status
     for line in download:
-        print(line.url, len(line.content or ""))
+        print(line.url, line.content_status)
 ```
 
-Both downloads carry the crawl's `status` when the file was read. On a
-`running` crawl the file holds only the results kept so far.
+`content` takes a result or its content id. `download` returns a
+`CrawlDownload`: its `status` is the crawl's status when the file was
+read, and iterating it yields parsed lines. On a `running` crawl the
+file holds only the results kept so far.
 
 ### List and stop crawls
 
 ```python
-for c in client.iter_crawls():          # newest first, without results
+page = client.list(limit=20)            # newest first, without results
+for c in page.crawls:
     print(c.crawl_id, c.status.value)
+# Pass page.next_cursor as cursor= for the next page; it is None on the last.
 
 client.stop(crawl_id)                   # idempotent; read final counts with get()
 ```

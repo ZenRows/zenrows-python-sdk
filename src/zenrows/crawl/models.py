@@ -128,7 +128,7 @@ class CrawlResult(BaseModel):
     content_url: str | None = None
     """The page's path (e.g. `/v1/crawls/c_x/contents/ct_y`), present
     once `content_status` is `fetched`. Pass the result itself to
-    `ZenRowsCrawlClient.get_content`."""
+    `ZenRowsCrawlClient.content`."""
 
     @property
     def content_id(self) -> str | None:

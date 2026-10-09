@@ -10,7 +10,6 @@ that every result does. It starts one small crawl (a few credits) and
 reads it back every way the client can.
 """
 
-import json
 import os
 import time
 
@@ -63,7 +62,7 @@ def create_when_a_slot_frees(client: ZenRowsCrawlClient):
             time.sleep(wait)
 
 
-def test_crawl_end_to_end(client: ZenRowsCrawlClient, tmp_path):
+def test_crawl_end_to_end(client: ZenRowsCrawlClient):
     created = create_when_a_slot_frees(client)
     print(f"created {created.crawl_id} status={created.status.value}")
     assert created.crawl_id
@@ -76,7 +75,7 @@ def test_crawl_end_to_end(client: ZenRowsCrawlClient, tmp_path):
     )
     assert crawl.status is CrawlStatus.COMPLETED, crawl.error
 
-    results = list(client.iter_results(crawl.crawl_id))
+    results = list(client.results(crawl.crawl_id))
     print(f"results: {len(results)}")
     assert results
     if INCLUDE:
@@ -84,24 +83,19 @@ def test_crawl_end_to_end(client: ZenRowsCrawlClient, tmp_path):
 
     fetched = [r for r in results if r.content_id]
     assert fetched, "no result has a fetched page"
-    html = client.get_content(crawl.crawl_id, fetched[0])
+    html = client.content(crawl.crawl_id, fetched[0])
     print(f"content of {fetched[0].url}: {len(html)} chars")
     assert "<html" in html.lower()
 
-    download = client.iter_download(crawl.crawl_id)
+    download = client.download(crawl.crawl_id)
     assert download.status is CrawlStatus.COMPLETED
     lines = list(download)
     print(f"download lines: {len(lines)}")
     assert len(lines) == len(results)
-    saved = client.download(crawl.crawl_id, tmp_path / f"{crawl.crawl_id}.jsonl")
-    assert saved.status is CrawlStatus.COMPLETED
-    assert [json.loads(line)["url"] for line in saved.path.read_text().splitlines()] == [
-        line.url for line in lines
-    ]
 
-    listed = next((c for c in client.iter_crawls() if c.crawl_id == crawl.crawl_id), None)
-    print(f"listed: {listed is not None}")
-    assert listed is not None
+    listed = client.list(limit=100)
+    print(f"listed: {crawl.crawl_id in [c.crawl_id for c in listed.crawls]}")
+    assert crawl.crawl_id in [c.crawl_id for c in listed.crawls]
 
     stopped = client.stop(crawl.crawl_id)
     print(f"stop on ended crawl: status={stopped.status.value}")

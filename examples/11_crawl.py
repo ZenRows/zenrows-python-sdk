@@ -3,12 +3,12 @@
 Demonstrates the Crawl client (`ZenRowsCrawlClient`):
   - `create(url, depth=..., include_patterns=..., output_format="html")`
     starts a crawl and returns at once, `running`.
-  - `wait(crawl_id)` blocks until it ends and returns the final `Crawl`
-    (a `failed` crawl is returned, with `error` set).
-  - `iter_results(crawl_id)` pages through the kept URLs.
-  - `get_content(crawl_id, result)` reads one kept URL's HTML.
-  - `download(crawl_id, path)` saves every result as NDJSON and
-    returns the path and the crawl's status.
+  - `wait(crawl_id)` polls until it ends, or 600 s pass, and returns
+    the `Crawl` (still `running` on timeout; `error` set when `failed`).
+  - `results(crawl_id)` pages through the kept URLs.
+  - `content(crawl_id, result)` reads one kept URL's HTML.
+  - `download(crawl_id)` reads every result as NDJSON, with the crawl's
+    status; the example saves the lines to a file.
 
 Run with:
     export ZENROWS_API_KEY=zr_...
@@ -16,6 +16,7 @@ Run with:
 """
 
 import argparse
+import json
 import os
 
 from zenrows import ZenRowsCrawlClient
@@ -57,16 +58,20 @@ def main() -> None:
     )
     if crawl.status is CrawlStatus.FAILED and crawl.error:
         raise SystemExit(f"crawl failed: {crawl.error.code.value}: {crawl.error.detail}")
+    if crawl.status is CrawlStatus.RUNNING:
+        print("still running: the results below are what it has kept so far")
 
-    for result in client.iter_results(crawl.crawl_id):
+    for result in client.results(crawl.crawl_id):
         status = result.content_status.value if result.content_status else "-"
         print(f"  [{status}] {result.url}")
         if result.content_id:
-            html = client.get_content(crawl.crawl_id, result)
+            html = client.content(crawl.crawl_id, result)
             print(f"           {len(html)} chars of HTML")
 
-    saved = client.download(crawl.crawl_id, args.out)
-    print(f"wrote {saved.path}")
+    with client.download(crawl.crawl_id) as download, open(args.out, "w") as f:
+        for line in download:
+            f.write(json.dumps(line.model_dump(mode="json", exclude_none=True)) + "\n")
+    print(f"wrote {args.out} (crawl {download.status.value if download.status else '-'})")
 
 
 if __name__ == "__main__":

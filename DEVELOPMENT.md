@@ -49,7 +49,7 @@ override) stays in our control.
 
 The Crawl client uses the shared HTTP transport (`_transport.py`: key
 header, retries, problem+json) with `CrawlAPIError.from_response` as
-its error mapping, and the shared `poll_until` loop. Its models are
+its error mapping. Its models are
 hand-written: the surface is a few small schemas, so there is no Crawl
 codegen step.
 Keep them tolerant: unknown fields are ignored, and every response enum
