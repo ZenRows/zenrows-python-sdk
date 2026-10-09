@@ -4,7 +4,7 @@ Crawl is in Beta: its surface may still change.
 
 What's where:
   - `client.ZenRowsCrawlClient` — the typed facade: create, get, list,
-    stop, contents, download, and a `wait` helper.
+    results, content, download, stop, and wait.
   - `models` — hand-written pydantic v2 response models with open enums.
   - `errors.CrawlAPIError` — RFC 9457 problem+json mapping.
 
@@ -12,11 +12,9 @@ What's where:
 without it a crawl returns URLs only.
 """
 
-from zenrows.batch._waiters import WaiterTimeout
 from zenrows.crawl.client import (
     DEFAULT_BASE_URL,
     CrawlDownload,
-    CrawlDownloadFile,
     ZenRowsCrawlClient,
 )
 from zenrows.crawl.errors import CRAWL_NOT_ENABLED, CrawlAPIError
@@ -44,7 +42,6 @@ __all__ = [
     "Crawl",
     "CrawlAPIError",
     "CrawlDownload",
-    "CrawlDownloadFile",
     "CrawlErrorCode",
     "CrawlList",
     "CrawlResult",
@@ -55,6 +52,5 @@ __all__ = [
     "OutputFormat",
     "RunError",
     "StopReason",
-    "WaiterTimeout",
     "ZenRowsCrawlClient",
 ]

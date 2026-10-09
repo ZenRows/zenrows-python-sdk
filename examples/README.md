@@ -28,7 +28,7 @@ uv run python examples/02_download_to_dir.py --job-id 01J...
 | `08_download_all_results.py`   | `download_all_results()` — server-side export zip of a whole run |
 | `09_scheduled_jobs.py`         | scheduled cadences (`Rate`/`Calendar`/`At`), `pause`/`resume`/`update_schedule`, per-fire runs, `retry_failed` |
 | `10_lightweight_handles.py`    | `client.job(id)` / `client.run(id, rid)` — act on a known id without a GET (`.data` lazily fetches) |
-| `11_crawl.py`                  | Crawl: `create` → `wait` → `iter_results` + `get_content` → `download` (NDJSON) |
+| `11_crawl.py`                  | Crawl: `create` → `wait` → `results` + `content` → `download` (NDJSON) |
 
 The samples are deliberately small — each demonstrates one feature
 end-to-end so they double as living documentation.
