@@ -1,6 +1,7 @@
-"""Public surface for the ZenRows Crawl API (Beta).
+"""Public surface for the ZenRows Crawl API (New).
 
-Crawl is in Beta: its surface may still change.
+Crawl is still evolving: new features are coming, limits may be tuned,
+and the changelog announces each change.
 
 What's where:
   - `client.ZenRowsCrawlClient` — the typed facade: create, get, list,

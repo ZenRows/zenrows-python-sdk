@@ -1,4 +1,4 @@
-"""11: Crawl a site → wait → read URLs and pages. Crawl is in Beta.
+"""11: Crawl a site → wait → read URLs and pages.
 
 Demonstrates the Crawl client (`ZenRowsCrawlClient`):
   - `create(url, depth=..., include_patterns=..., output_format="html")`
