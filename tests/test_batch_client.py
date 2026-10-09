@@ -90,6 +90,17 @@ def test_problem_response_raises_batch_api_error(client: ZenRowsBatchClient):
 
 
 @respx.mock
+def test_problem_without_code_falls_back_to_internal(client: ZenRowsBatchClient):
+    respx.get(f"{BASE_URL}/jobs/missing").mock(
+        return_value=Response(500, json={"title": "Server error", "status": 500})
+    )
+    with pytest.raises(BatchAPIError) as exc_info:
+        client.get_job("missing")
+    assert exc_info.value.code == "internal"
+    assert str(exc_info.value) == "500 Server error: internal"
+
+
+@respx.mock
 def test_iter_results_auto_paginates(client: ZenRowsBatchClient):
     """Auto-pagination uses next_cursor; yields TaskResult instances."""
     page1 = {

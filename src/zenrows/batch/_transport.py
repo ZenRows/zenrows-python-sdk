@@ -117,17 +117,18 @@ class _Transport:
         params: dict[str, Any] | None,
         headers: dict[str, str] | None,
         content: bytes | None = None,
+        retry_statuses: frozenset[int] = _RETRYABLE_STATUSES,
     ) -> httpx.Response:
         """Issue the request, retrying transient failures on idempotent
         requests.
 
-        Retries `{429, 502, 503, 504}` and transient network errors up
-        to `retries` times, with jittered exponential backoff (honoring
-        `Retry-After` when present). Only idempotent requests are
-        replayed — `GET`/`PUT`/`DELETE`/`HEAD`/`OPTIONS`, plus `POST`
-        when the caller supplied an `Idempotency-Key`. Our own timeouts
-        (`httpx.TimeoutException`) are never retried: the caller set
-        that budget.
+        Retries `retry_statuses` (default `{429, 502, 503, 504}`) and
+        transient network errors up to `retries` times, with jittered
+        exponential backoff (honoring `Retry-After` when present). Only
+        idempotent requests are replayed — `GET`/`PUT`/`DELETE`/`HEAD`/
+        `OPTIONS`, plus `POST` when the caller supplied an
+        `Idempotency-Key`. Our own timeouts (`httpx.TimeoutException`)
+        are never retried: the caller set that budget.
         """
         idempotent = method.upper() in _IDEMPOTENT_METHODS or (
             method.upper() == "POST" and _has_idempotency_key(headers)
@@ -149,11 +150,7 @@ class _Transport:
                     continue
                 raise
 
-            if (
-                idempotent
-                and attempt < self._retries
-                and response.status_code in _RETRYABLE_STATUSES
-            ):
+            if idempotent and attempt < self._retries and response.status_code in retry_statuses:
                 wait_ms = _retry_after_ms(response) or _backoff_ms(attempt)
                 response.close()
                 time.sleep(wait_ms / 1000)
@@ -216,6 +213,7 @@ class _Transport:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         content: bytes | None = None,
+        retry_statuses: frozenset[int] = _RETRYABLE_STATUSES,
     ) -> httpx.Response:
         """Send a request (with retries) and return the raw response,
         raising the mapped error on non-2xx. For non-JSON bodies."""
@@ -226,6 +224,7 @@ class _Transport:
             params=_drop_none(params),
             headers=headers,
             content=content,
+            retry_statuses=retry_statuses,
         )
         elapsed_ms = (time.monotonic() - start) * 1000
         self._raise_for_status(method, path, response)

@@ -3,7 +3,7 @@
 Covers the wire contract with respx: request shapes (path, method, key
 header, bodies carrying only what the caller set), response parsing
 with open enums, problem+json error mapping, the results scanner's
-stop-on-null rule, downloads, and the waiter.
+stop rule, downloads with their status, retries, and the waiter.
 """
 
 import json
@@ -17,6 +17,7 @@ from zenrows.batch._open_enum import is_unknown
 from zenrows.crawl import (
     ContentStatus,
     CrawlAPIError,
+    CrawlDownloadFile,
     CrawlErrorCode,
     CrawlResult,
     CrawlStatus,
@@ -66,10 +67,10 @@ def client() -> ZenRowsCrawlClient:
 
 @pytest.fixture
 def no_sleep(monkeypatch):
-    """Record + swallow sleeps (waiter, scanner and retry backoff all
-    call `time.sleep`) so tests run instantly."""
+    """Record + swallow sleeps (waiter and retry backoff both call
+    `time.sleep`) so tests run instantly."""
     slept: list[float] = []
-    monkeypatch.setattr("zenrows.crawl.client.time.sleep", slept.append)
+    monkeypatch.setattr("time.sleep", slept.append)
     return slept
 
 
@@ -81,14 +82,9 @@ def test_missing_api_key_raises():
         ZenRowsCrawlClient(api_key="")
 
 
-def test_default_base_url(monkeypatch):
-    monkeypatch.delenv("ZENROWS_CRAWL_BASE_URL", raising=False)
-    assert ZenRowsCrawlClient(api_key=API_KEY).base_url.rstrip("/") == "https://api.zenrows.com/v1"
-
-
-def test_base_url_env_and_kwarg_precedence(monkeypatch):
+def test_base_url_is_a_constructor_option_only(monkeypatch):
     monkeypatch.setenv("ZENROWS_CRAWL_BASE_URL", "http://env-set/v1")
-    assert ZenRowsCrawlClient(api_key=API_KEY).base_url.rstrip("/") == "http://env-set/v1"
+    assert ZenRowsCrawlClient(api_key=API_KEY).base_url.rstrip("/") == "https://api.zenrows.com/v1"
     assert ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL).base_url.rstrip("/") == BASE_URL
 
 
@@ -262,12 +258,10 @@ def test_stop_posts_without_body(client: ZenRowsCrawlClient):
 
 
 @respx.mock
-def test_iter_results_stops_on_null_cursor(client: ZenRowsCrawlClient, no_sleep):
+def test_iter_results_stops_on_null_cursor(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
         side_effect=[
             Response(200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")),
-            # Caught up with a running crawl: no results, same cursor back.
-            Response(200, json=crawl_body(results=[], next_cursor="k1")),
             Response(
                 200,
                 json=crawl_body(
@@ -277,14 +271,31 @@ def test_iter_results_stops_on_null_cursor(client: ZenRowsCrawlClient, no_sleep)
         ]
     )
 
-    urls = [r.url for r in client.iter_results("c_1", poll_interval=0.5)]
+    urls = [r.url for r in client.iter_results("c_1")]
 
     assert urls == ["https://a", "https://b"]
-    assert route.call_count == 3
+    assert route.call_count == 2
     assert "cursor" not in route.calls[0].request.url.params
     assert route.calls[1].request.url.params["cursor"] == "k1"
-    assert route.calls[2].request.url.params["cursor"] == "k1"
-    assert no_sleep == [0.5]  # slept only on the empty page of a running crawl
+
+
+@respx.mock
+def test_iter_results_returns_at_first_empty_page_of_running_crawl(
+    client: ZenRowsCrawlClient, no_sleep
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            Response(200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")),
+            # Caught up with a running crawl: no results, same cursor back.
+            Response(200, json=crawl_body(results=[], next_cursor="k1")),
+        ]
+    )
+
+    urls = [r.url for r in client.iter_results("c_1")]
+
+    assert urls == ["https://a"]
+    assert route.call_count == 2
+    assert no_sleep == []
 
 
 # ----- contents / download -----
@@ -314,11 +325,12 @@ def test_get_content_without_content_url_raises(client: ZenRowsCrawlClient):
 NDJSON = (
     b'{"url":"https://a","content_status":"fetched","content":"<html>a</html>"}\n'
     b'{"url":"https://b","content_status":"failed"}\n'
+    b'{"url":"https://c","content_status":"fetched","content":{"title":"C"}}\n'
 )
 
 
 @respx.mock
-def test_iter_download_parses_lines(client: ZenRowsCrawlClient):
+def test_iter_download_parses_lines_and_status(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
         return_value=Response(
             200,
@@ -326,27 +338,39 @@ def test_iter_download_parses_lines(client: ZenRowsCrawlClient):
             content=NDJSON,
         )
     )
-    lines = list(client.iter_download("c_1"))
-    assert [line.url for line in lines] == ["https://a", "https://b"]
+    download = client.iter_download("c_1")
+    assert download.status is CrawlStatus.COMPLETED
+    lines = list(download)
+    assert [line.url for line in lines] == ["https://a", "https://b", "https://c"]
     assert lines[0].content == "<html>a</html>"
     assert lines[1].content_status is ContentStatus.FAILED
+    assert lines[2].content == {"title": "C"}
 
 
 @respx.mock
-def test_download_writes_file_and_warns_when_partial(client: ZenRowsCrawlClient, tmp_path, caplog):
+def test_iter_download_without_status_header(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls/c_1/download").mock(return_value=Response(200, content=b""))
+    with client.iter_download("c_1") as download:
+        assert download.status is None
+        assert list(download) == []
+
+
+@respx.mock
+def test_download_writes_file_and_returns_status(client: ZenRowsCrawlClient, tmp_path):
     respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
         return_value=Response(200, headers={"X-Crawl-Status": "running"}, content=NDJSON)
     )
-    target = client.download("c_1", tmp_path / "out" / "c_1.jsonl")
-    assert target.read_bytes() == NDJSON
-    assert "still running" in caplog.text
+    target = tmp_path / "out" / "c_1.jsonl"
+    saved = client.download("c_1", target)
+    assert saved == CrawlDownloadFile(path=target, status=CrawlStatus.RUNNING)
+    assert saved.path.read_bytes() == NDJSON
 
 
 @respx.mock
 def test_download_maps_errors(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/nope/download").mock(return_value=problem(404, "crawl_not_found"))
     with pytest.raises(CrawlAPIError) as exc_info:
-        list(client.iter_download("nope"))
+        client.iter_download("nope")
     assert exc_info.value.code == "crawl_not_found"
 
 
@@ -401,6 +425,43 @@ def test_crawl_not_enabled_has_clear_message(client: ZenRowsCrawlClient):
     assert err.not_enabled
     assert err.code == "REQS008"
     assert "Crawl is not enabled for this account" in str(err)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [Response(502, text="bad gateway"), Response(500, json={"title": "Server error"})],
+)
+@respx.mock
+def test_error_without_code_has_none_code(client: ZenRowsCrawlClient, response):
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(return_value=response)
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.get("c_1")
+    assert exc_info.value.status_code == response.status_code
+    assert exc_info.value.code is None
+
+
+@respx.mock
+def test_keyed_create_does_not_retry_too_many_crawls(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    route = respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=problem(429, "too_many_crawls", headers={"Retry-After": "1"})
+    )
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.create("https://example.com/", depth=1, idempotency_key="idem-1")
+    assert exc_info.value.code == "too_many_crawls"
+    assert route.call_count == 1
+    assert no_sleep == []
+
+
+@respx.mock
+def test_keyed_create_retries_transient_status(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    route = respx.post(f"{BASE_URL}/crawls").mock(
+        side_effect=[Response(503), Response(202, json=crawl_body())]
+    )
+    client.create("https://example.com/", depth=1, idempotency_key="idem-1")
+    assert route.call_count == 2
+    assert len(no_sleep) == 1
 
 
 @respx.mock

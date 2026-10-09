@@ -24,7 +24,7 @@ class ProblemDetail:
     type: str
     title: str
     status: int
-    code: str
+    code: str | None
     detail: str | None = None
     instance: str | None = None
     extras: dict[str, Any] | None = None
@@ -48,7 +48,7 @@ class ProblemDetail:
             type=body.get("type", "about:blank"),
             title=body.get("title", "Error"),
             status=int(body.get("status", response.status_code)),
-            code=body.get("code", "internal"),
+            code=body.get("code"),
             detail=body.get("detail"),
             instance=body.get("instance"),
             extras=extras or None,
@@ -68,10 +68,10 @@ class BatchAPIError(Exception):
         self.status_code = status_code
         self.problem = problem
         self.raw = raw
-        self.code: str = problem.code if problem else "internal"
+        self.code: str = (problem.code if problem else None) or "internal"
         self.detail: str | None = problem.detail if problem else None
         msg = (
-            f"{status_code} {problem.title}: {problem.detail or problem.code}"
+            f"{status_code} {problem.title}: {problem.detail or self.code}"
             if problem
             else f"{status_code} (no problem body)"
         )
