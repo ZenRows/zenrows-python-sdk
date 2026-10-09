@@ -13,7 +13,6 @@ without it a crawl returns URLs only.
 """
 
 from zenrows.crawl.client import (
-    DEFAULT_BASE_URL,
     CrawlDownload,
     ZenRowsCrawlClient,
 )
@@ -36,7 +35,6 @@ from zenrows.crawl.models import (
 
 __all__ = [
     "CRAWL_NOT_ENABLED_CODE",
-    "DEFAULT_BASE_URL",
     "ContentStatus",
     "Coverage",
     "Crawl",

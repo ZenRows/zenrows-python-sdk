@@ -39,7 +39,7 @@ from zenrows.crawl.models import (
     DownloadLine,
 )
 
-DEFAULT_BASE_URL = "https://api.zenrows.com/v1"
+_DEFAULT_BASE_URL = "https://api.zenrows.com/v1"
 DEFAULT_USER_AGENT = f"zenrows-crawl-python/{__version__}"
 
 _log = logging.getLogger("zenrows.crawl.transport")
@@ -112,7 +112,7 @@ class ZenRowsCrawlClient:
         user_agent: str = DEFAULT_USER_AGENT,
         httpx_args: dict[str, Any] | None = None,
     ):
-        """`base_url` defaults to `DEFAULT_BASE_URL`. `retries` bounds
+        """`base_url` defaults to `https://api.zenrows.com/v1`. `retries` bounds
         automatic retries of transient failures (HTTP 429/502/503/504
         and network errors) on idempotent requests — GETs, and a
         `create` that carries an `idempotency_key` (never on 429 for
@@ -121,7 +121,7 @@ class ZenRowsCrawlClient:
         if not api_key:
             raise ValueError("ZenRowsCrawlClient: api_key is required.")
         self._t = _Transport(
-            base_url=base_url or DEFAULT_BASE_URL,
+            base_url=base_url or _DEFAULT_BASE_URL,
             api_key=api_key,
             user_agent=user_agent,
             timeout=timeout,
@@ -316,7 +316,7 @@ class ZenRowsCrawlClient:
             page = self.get(crawl_id, limit=1)
             crawl = Crawl.model_validate(page.model_dump(exclude={"results", "next_cursor"}))
             remaining = deadline - time.monotonic()
-            if crawl.is_terminal or remaining <= 0:
+            if crawl.status is not CrawlStatus.RUNNING or remaining <= 0:
                 return crawl
             time.sleep(min(interval * random.uniform(0.8, 1.2), remaining))
             interval = min(interval * _POLL_BACKOFF, _MAX_POLL_INTERVAL)
@@ -328,7 +328,6 @@ def _crawl_status(response: httpx.Response) -> CrawlStatus | None:
 
 
 __all__ = [
-    "DEFAULT_BASE_URL",
     "DEFAULT_USER_AGENT",
     "CrawlDownload",
     "ZenRowsCrawlClient",
