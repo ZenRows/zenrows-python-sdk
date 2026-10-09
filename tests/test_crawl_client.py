@@ -248,6 +248,53 @@ def test_stop_posts_without_body(client: ZenRowsCrawlClient):
     assert route.calls.last.request.content == b""
 
 
+@respx.mock
+def test_stop_retries_crawl_busy_after_retry_after(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        side_effect=[
+            problem(503, "crawl_busy", headers={"Retry-After": "1"}),
+            Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
+        ]
+    )
+
+    stopped = client.stop("c_1")
+
+    assert stopped.status is CrawlStatus.STOPPED
+    assert route.call_count == 2
+    assert no_sleep == [1.0]
+
+
+@respx.mock
+def test_stop_surfaces_crawl_busy_after_retries(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        return_value=problem(503, "crawl_busy", headers={"Retry-After": "1"})
+    )
+
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.stop("c_1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.code == "crawl_busy"
+    assert route.call_count == 3
+    assert no_sleep == [1.0, 1.0]
+
+
+@respx.mock
+def test_stop_does_not_retry_other_503(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        return_value=problem(503, "service_unavailable", headers={"Retry-After": "1"})
+    )
+
+    with pytest.raises(CrawlAPIError):
+        client.stop("c_1")
+
+    assert route.call_count == 1
+    assert no_sleep == []
+
+
 # ----- results scanner -----
 
 

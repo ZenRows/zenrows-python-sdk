@@ -47,6 +47,10 @@ _log = logging.getLogger("zenrows.crawl.transport")
 # 429 `too_many_crawls` is a capacity limit, not a transient failure.
 _CREATE_RETRY_STATUSES = _RETRYABLE_STATUSES - {429}
 
+# 503 `crawl_busy` on stop: nothing was saved and the crawl is still
+# running, so the stop is safe to repeat after `Retry-After`.
+_CRAWL_BUSY = "crawl_busy"
+
 _POLL_INTERVAL = 2.0
 _POLL_BACKOFF = 1.5
 _MAX_POLL_INTERVAL = 15.0
@@ -117,9 +121,11 @@ class ZenRowsCrawlClient:
         and network errors) on idempotent requests — GETs, and a
         `create` that carries an `idempotency_key` (never on 429 for
         `create`). Retries use jittered exponential backoff and honor
-        `Retry-After`; set `retries=0` to disable."""
+        `Retry-After`; set `retries=0` to disable. It also bounds the
+        retries of a `stop` answered 503 `crawl_busy`."""
         if not api_key:
             raise ValueError("ZenRowsCrawlClient: api_key is required.")
+        self._retries = max(0, retries)
         self._t = _Transport(
             base_url=base_url or _DEFAULT_BASE_URL,
             api_key=api_key,
@@ -261,8 +267,22 @@ class ZenRowsCrawlClient:
         Idempotent: a crawl that already ended answers as it ended.
         The answer carries no counts; read the final coverage and
         results with `get` once pages already in flight have finished.
+
+        A 503 `crawl_busy` means the stop was not saved and the crawl is
+        still running; `stop` retries it up to `retries` times, waiting
+        `Retry-After` seconds each time, then raises it.
         """
-        return CrawlStop.model_validate(self._t.request_json("POST", f"/crawls/{crawl_id}/stop"))
+        attempt = 0
+        while True:
+            try:
+                return CrawlStop.model_validate(
+                    self._t.request_json("POST", f"/crawls/{crawl_id}/stop")
+                )
+            except CrawlAPIError as err:
+                if err.status_code != 503 or err.code != _CRAWL_BUSY or attempt >= self._retries:
+                    raise
+                time.sleep(err.retry_after if err.retry_after is not None else 1.0)
+                attempt += 1
 
     # ===== contents =====
 
