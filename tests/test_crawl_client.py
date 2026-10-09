@@ -15,6 +15,7 @@ from httpx import Response
 from zenrows import ZenRowsCrawlClient
 from zenrows.batch._open_enum import is_unknown
 from zenrows.crawl import (
+    CRAWL_NOT_ENABLED_CODE,
     ContentStatus,
     CrawlAPIError,
     CrawlErrorCode,
@@ -140,11 +141,6 @@ def test_create_sends_every_option_and_idempotency_key(client: ZenRowsCrawlClien
     assert "discovery" not in body
 
 
-def test_create_output_format_accepts_only_html(client: ZenRowsCrawlClient):
-    with pytest.raises(ValueError, match="output_format"):
-        client.create("https://example.com/", depth=1, output_format="json")  # type: ignore[arg-type]
-
-
 # ----- get / list / stop -----
 
 
@@ -182,7 +178,7 @@ def test_get_parses_results_and_open_enums(client: ZenRowsCrawlClient):
     assert is_unknown(page.output_format)  # type: ignore[arg-type]
     assert page.next_cursor is None
     assert page.results[0].content_status is ContentStatus.FETCHED
-    assert page.results[0].content_id == "ct_a"
+    assert page.results[0].content_url == "/v1/crawls/c_1/contents/ct_a"
     unknown = page.results[1].content_status
     assert unknown is not None and is_unknown(unknown) and unknown.value == "archived"
 
@@ -300,7 +296,7 @@ def test_results_returns_at_first_empty_page_of_running_crawl(client: ZenRowsCra
 
 
 @respx.mock
-def test_content_accepts_result_or_id(client: ZenRowsCrawlClient):
+def test_content_accepts_result_url_or_id(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls/c_1/contents/ct_a").mock(
         return_value=Response(
             200, headers={"Content-Type": "text/html"}, text="<html>product</html>"
@@ -311,8 +307,9 @@ def test_content_accepts_result_or_id(client: ZenRowsCrawlClient):
     )  # type: ignore[arg-type]
 
     assert client.content("c_1", result) == "<html>product</html>"
+    assert client.content("c_1", "/v1/crawls/c_1/contents/ct_a") == "<html>product</html>"
     assert client.content("c_1", "ct_a") == "<html>product</html>"
-    assert route.call_count == 2
+    assert route.call_count == 3
 
 
 def test_content_without_content_url_raises(client: ZenRowsCrawlClient):
@@ -338,7 +335,7 @@ def test_download_parses_lines_and_status(client: ZenRowsCrawlClient):
     )
     download = client.download("c_1")
     assert download.status is CrawlStatus.COMPLETED
-    lines = list(download)
+    lines = list(download.lines)
     assert [line.url for line in lines] == ["https://a", "https://b", "https://c"]
     assert lines[0].content == "<html>a</html>"
     assert lines[1].content_status is ContentStatus.FAILED
@@ -350,7 +347,7 @@ def test_download_without_status_header(client: ZenRowsCrawlClient):
     respx.get(f"{BASE_URL}/crawls/c_1/download").mock(return_value=Response(200, content=b""))
     with client.download("c_1") as download:
         assert download.status is None
-        assert list(download) == []
+        assert list(download.lines) == []
 
 
 @respx.mock
@@ -373,7 +370,7 @@ def test_not_found_maps_to_crawl_api_error(client: ZenRowsCrawlClient):
     assert err.status_code == 404
     assert err.code == "crawl_not_found"
     assert err.detail == "detail for crawl_not_found"
-    assert not err.not_enabled
+    assert err.code != CRAWL_NOT_ENABLED_CODE
 
 
 @respx.mock
@@ -409,8 +406,7 @@ def test_crawl_not_enabled_has_clear_message(client: ZenRowsCrawlClient):
     with pytest.raises(CrawlAPIError) as exc_info:
         client.create("https://example.com/", depth=1)
     err = exc_info.value
-    assert err.not_enabled
-    assert err.code == "REQS008"
+    assert err.code == CRAWL_NOT_ENABLED_CODE
     assert "Crawl is not enabled for this account" in str(err)
 
 

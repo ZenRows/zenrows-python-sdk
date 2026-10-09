@@ -130,13 +130,6 @@ class CrawlResult(BaseModel):
     once `content_status` is `fetched`. Pass the result itself to
     `ZenRowsCrawlClient.content`."""
 
-    @property
-    def content_id(self) -> str | None:
-        """The content id, the last segment of `content_url`."""
-        if not self.content_url:
-            return None
-        return self.content_url.rstrip("/").rsplit("/", 1)[-1]
-
 
 class CrawlWithResults(Crawl):
     """A crawl and one page of the URLs it has kept (`GET /crawls/{id}`).

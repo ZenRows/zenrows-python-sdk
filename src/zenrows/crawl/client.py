@@ -57,8 +57,8 @@ class CrawlDownload:
 
     `status` is the crawl's status when the file was read
     (`X-Crawl-Status`): `running` means the file holds only what the
-    crawl has kept so far. Iterate it once for the parsed lines; the
-    connection closes when the iteration ends. Use it as a context
+    crawl has kept so far. Iterate `lines` once for the parsed lines;
+    the connection closes when the iteration ends. Use it as a context
     manager to close it without reading to the end.
     """
 
@@ -67,7 +67,11 @@ class CrawlDownload:
         self._response = response
         self._close = close
 
-    def __iter__(self) -> Iterator[DownloadLine]:
+    @property
+    def lines(self) -> Iterator[DownloadLine]:
+        return self._lines()
+
+    def _lines(self) -> Iterator[DownloadLine]:
         try:
             for line in self._response.iter_lines():
                 if line.strip():
@@ -94,7 +98,7 @@ class ZenRowsCrawlClient:
 
     Every non-2xx raises `CrawlAPIError`; branch on its `status_code`
     and `code`. An account without Crawl enabled gets 403 `REQS008`
-    (`CrawlAPIError.not_enabled`).
+    (`CRAWL_NOT_ENABLED_CODE`).
     """
 
     def __init__(
@@ -178,8 +182,6 @@ class ZenRowsCrawlClient:
         Batch jobs, `create` raises 429 `too_many_crawls` without
         retrying; retry after the error's `retry_after` seconds.
         """
-        if output_format not in (None, "html"):
-            raise ValueError(f"create: output_format must be 'html' or None, not {output_format!r}")
         body: dict[str, Any] = {"url": url, "depth": depth}
         optional: dict[str, Any] = {
             "max_items": max_items,
@@ -269,24 +271,24 @@ class ZenRowsCrawlClient:
         URL's page, as HTML text.
 
         `content` is a `CrawlResult` whose `content_status` is
-        `fetched`, or its content id (the last segment of its
-        `content_url`). Only crawls created with an `output_format`
-        have contents; anything else is 404 `content_not_found`.
+        `fetched`, its `content_url`, or its content id (the last
+        segment of the `content_url`). Only crawls created with an
+        `output_format` have contents; anything else is 404
+        `content_not_found`.
         """
         if isinstance(content, CrawlResult):
-            content_id = content.content_id
-            if not content_id:
+            if not content.content_url:
                 raise ValueError(
                     f"content: {content.url} has no content_url "
                     f"(content_status={content.content_status})"
                 )
-        else:
-            content_id = content
+            content = content.content_url
+        content_id = content.rstrip("/").rsplit("/", 1)[-1]
         return self._t.request("GET", f"/crawls/{crawl_id}/contents/{content_id}").text
 
     def download(self, crawl_id: str) -> CrawlDownload:
         """`GET /crawls/{crawl_id}/download` — open the NDJSON file and
-        return it as a `CrawlDownload`: iterate it for parsed
+        return it as a `CrawlDownload`: iterate its `lines` for parsed
         `DownloadLine`s (url, content_status, content), and read its
         `status`.
 

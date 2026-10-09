@@ -81,7 +81,7 @@ def test_crawl_end_to_end(client: ZenRowsCrawlClient):
     if INCLUDE:
         assert all(INCLUDE in r.url for r in results), [r.url for r in results]
 
-    fetched = [r for r in results if r.content_id]
+    fetched = [r for r in results if r.content_url]
     assert fetched, "no result has a fetched page"
     html = client.content(crawl.crawl_id, fetched[0])
     print(f"content of {fetched[0].url}: {len(html)} chars")
@@ -89,7 +89,7 @@ def test_crawl_end_to_end(client: ZenRowsCrawlClient):
 
     download = client.download(crawl.crawl_id)
     assert download.status is CrawlStatus.COMPLETED
-    lines = list(download)
+    lines = list(download.lines)
     print(f"download lines: {len(lines)}")
     assert len(lines) == len(results)
 

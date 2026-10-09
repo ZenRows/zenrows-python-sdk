@@ -532,6 +532,14 @@ running crawl it yields only the URLs kept so far. Call `wait` first to
 read every result. `results(crawl_id, limit=...)` sets the page size of
 each request. `get(crawl_id, cursor=..., limit=...)` returns one raw page.
 
+The client takes these options: `base_url` (default
+`https://api.zenrows.com/v1`), `retries` (default 3; set 0 to disable)
+and `timeout` (seconds per request, default 30):
+
+```python
+client = ZenRowsCrawlClient(api_key, base_url="https://api.zenrows.com/v1", retries=3, timeout=30)
+```
+
 ### Read the pages
 
 Pass `output_format="html"` to also fetch the page of every kept URL:
@@ -541,19 +549,19 @@ crawl = client.create(start_url, depth=1, output_format="html")
 client.wait(crawl.crawl_id)
 
 for result in client.results(crawl.crawl_id):
-    if result.content_id:                        # content_status == fetched
+    if result.content_url:                       # content_status == fetched
         html = client.content(crawl.crawl_id, result)
 
 # Or everything in one NDJSON file: {"url", "content_status", "content"} per line.
 with client.download(crawl.crawl_id) as download:  # streamed, parsed
     print(download.status)                         # from X-Crawl-Status
-    for line in download:
+    for line in download.lines:
         print(line.url, line.content_status)
 ```
 
-`content` takes a result or its content id. `download` returns a
-`CrawlDownload`: its `status` is the crawl's status when the file was
-read, and iterating it yields parsed lines. On a `running` crawl the
+`content` takes a result, its `content_url`, or its content id.
+`download` returns a `CrawlDownload`: its `status` is the crawl's status
+when the file was read, and its `lines` yields parsed lines. On a `running` crawl the
 file holds only the results kept so far.
 
 ### List and stop crawls
@@ -572,12 +580,12 @@ client.stop(crawl_id)                   # idempotent; read final counts with get
 Every non-2xx raises `CrawlAPIError`. Branch on `status_code` and `code`:
 
 ```python
-from zenrows.crawl import CrawlAPIError
+from zenrows.crawl import CRAWL_NOT_ENABLED_CODE, CrawlAPIError
 
 try:
     client.create(start_url, depth=1)
 except CrawlAPIError as exc:
-    if exc.not_enabled:                 # 403 REQS008
+    if exc.code == CRAWL_NOT_ENABLED_CODE:  # 403 REQS008
         print("Crawl is not enabled for this account")
     elif exc.code == "too_many_crawls": # 429: active jobs limit reached
         print("retry in", exc.retry_after, "s")
@@ -590,7 +598,7 @@ except CrawlAPIError as exc:
 | Status | `code` | What to do |
 |---|---|---|
 | 400 | `invalid_request`, `unknown_parameter`, `invalid_cursor` | Fix the request. Do not retry it as is. |
-| 403 | `REQS008` | Crawl is not enabled for the account (`exc.not_enabled`). |
+| 403 | `REQS008` | Crawl is not enabled for the account (`CRAWL_NOT_ENABLED_CODE`). |
 | 404 | `crawl_not_found`, `content_not_found` | Check the id. |
 | 409 | `idempotency_request_in_flight` | Retry after the first request with this key finishes. |
 | 422 | `invalid_parameter`, `invalid_start_url`, `domain_not_allowed` | Fix the request. Do not retry it as is. |
