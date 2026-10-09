@@ -10,7 +10,7 @@
 SDK to access [Zenrows](https://www.zenrows.com/) APIs directly from Python.
 Zenrows handles proxies rotation, headless browsers, and CAPTCHAs for you.
 
-This package ships two clients:
+This package ships three clients:
 
   - **`ZenRowsClient`** — the original synchronous scraping client.
     One URL in, one HTML/JSON response out. Best for ad-hoc scraping.
@@ -18,6 +18,9 @@ This package ships two clients:
     thousands of URLs as one job, poll for results, optionally upload a
     CSV of URLs in one call. Best for offline / bulk pipelines.
     _(Private beta — [contact support](mailto:support@zenrows.com) for access.)_
+  - **`ZenRowsCrawlClient`** — the Crawl API client. Give it one start
+    URL; it follows links and returns the URLs (and, optionally, the
+    pages) it finds behind it. _(New.)_
 
 ## Table of Contents
 
@@ -37,6 +40,10 @@ This package ships two clients:
   - [Act on an id without a GET](#act-on-an-id-without-a-get)
   - [Scheduled jobs & webhooks](#scheduled-jobs--webhooks)
   - [Error handling](#error-handling)
+- [Quickstart — Crawl API (new) (`ZenRowsCrawlClient`)](#quickstart--crawl-api-new-zenrowscrawlclient)
+  - [Read the pages](#read-the-pages)
+  - [List and stop crawls](#list-and-stop-crawls)
+  - [Crawl errors](#crawl-errors)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -484,6 +491,125 @@ parse such runs, so upgrade before enabling API key credit caps with Batch.
 The full Batch surface (jobs, runs, tasks, results, content, history,
 file_inputs, HMAC keys) is reachable via methods on `ZenRowsBatchClient`.
 See `src/zenrows/batch/client.py` or `help(ZenRowsBatchClient)`.
+
+## Quickstart — Crawl API (new) (`ZenRowsCrawlClient`)
+
+Crawl is still evolving: new features are coming, limits may be tuned, and the changelog announces each change.
+
+A crawl starts from one URL, follows the links on each page up to
+`depth` hops, and keeps the URLs that match your patterns, up to
+`max_items`. It stays on the start URL's registrable domain;
+subdomains count. It runs in the background: `create` returns at once with
+`status="running"`, and `wait` blocks until it ends. Without
+`output_format` a crawl returns URLs only; `output_format="html"` also
+returns each kept URL's page.
+
+```python
+import os
+from zenrows import ZenRowsCrawlClient
+
+client = ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])
+
+crawl = client.create(
+    "https://example.com/products/",
+    depth=1,                         # link hops from the start URL
+    max_items=50,                    # stop after keeping 50 URLs (default 10)
+    max_pages=100,                   # stop after fetching 100 pages (default 10)
+    include_patterns=["/product/"],  # keep only URLs containing this
+)
+crawl = client.wait(crawl.crawl_id)            # polls up to timeout=600 s
+print(crawl.status.value, crawl.stop_reason, crawl.coverage)
+
+for result in client.results(crawl.crawl_id):  # follows next_cursor
+    print(result.url)
+```
+
+`wait` returns the crawl when it ends, or when `timeout` (seconds,
+default 600) runs out. It does not raise: on timeout the crawl is still
+`running` (call `wait` again, or `stop`), and a `failed` crawl comes
+back with `crawl.error` set. `results` does not poll: it returns at the first empty page, so on a
+running crawl it yields only the URLs kept so far. Call `wait` first to
+read every result. `results(crawl_id, limit=...)` sets the page size of
+each request. `get(crawl_id, cursor=..., limit=...)` returns one raw page.
+
+The client takes these options: `base_url` (default
+`https://api.zenrows.com/v1`), `retries` (default 3; set 0 to disable)
+and `timeout` (seconds per request, default 30):
+
+```python
+client = ZenRowsCrawlClient(api_key, base_url="https://api.zenrows.com/v1", retries=3, timeout=30)
+```
+
+### Read the pages
+
+Pass `output_format="html"` to also fetch the page of every kept URL:
+
+```python
+crawl = client.create(start_url, depth=1, output_format="html")
+client.wait(crawl.crawl_id)
+
+for result in client.results(crawl.crawl_id):
+    if result.content_url:                       # content_status == fetched
+        html = client.content(crawl.crawl_id, result)
+
+# Or everything in one NDJSON file: {"url", "content_status", "content"} per line.
+with client.download(crawl.crawl_id) as download:  # streamed, parsed
+    print(download.status)                         # from X-Crawl-Status
+    for line in download.lines:
+        print(line.url, line.content_status)
+```
+
+`content` takes a result, its `content_url`, or its content id.
+`download` returns a `CrawlDownload`: its `status` is the crawl's status
+when the file was read, and its `lines` yields parsed lines. On a `running` crawl the
+file holds only the results kept so far.
+
+### List and stop crawls
+
+```python
+page = client.list(limit=20)            # newest first, without results
+for c in page.crawls:
+    print(c.crawl_id, c.status.value)
+# Pass page.next_cursor as cursor= for the next page; it is None on the last.
+
+client.stop(crawl_id)                   # idempotent; read final counts with get()
+```
+
+### Crawl errors
+
+Every non-2xx raises `CrawlAPIError`. Branch on `status_code` and `code`:
+
+```python
+from zenrows.crawl import CRAWL_NOT_ENABLED_CODE, CrawlAPIError
+
+try:
+    client.create(start_url, depth=1)
+except CrawlAPIError as exc:
+    if exc.code == CRAWL_NOT_ENABLED_CODE:  # 403 REQS008
+        print("Crawl is not enabled for this account")
+    elif exc.code == "too_many_crawls": # 429: active jobs limit reached
+        print("retry in", exc.retry_after, "s")
+    elif exc.status_code in (400, 422):
+        print(exc.detail)
+    else:
+        raise
+```
+
+| Status | `code` | What to do |
+|---|---|---|
+| 400 | `invalid_request`, `unknown_parameter`, `invalid_cursor` | Fix the request. Do not retry it as is. |
+| 403 | `REQS008` | Crawl is not enabled for the account (`CRAWL_NOT_ENABLED_CODE`). |
+| 404 | `crawl_not_found`, `content_not_found` | Check the id. |
+| 409 | `idempotency_request_in_flight` | Retry after the first request with this key finishes. |
+| 422 | `invalid_parameter`, `invalid_start_url`, `domain_not_allowed` | Fix the request. Do not retry it as is. |
+| 422 | `idempotency_key_reused` | Use a new key, or no key. Do not retry it as is. |
+| 429 | `too_many_crawls` | The account has reached its limit of active jobs (3 by default), shared with its Batch jobs. Retry after `exc.retry_after` seconds. `create` does not retry it. |
+
+`code` is None when the response has no problem body with a code (for
+example a 502 from a proxy). A crawl that ended `failed` is not an error
+response: read `crawl.error.code` and `crawl.error.detail` on it. Response enums (`CrawlStatus`, `StopReason`,
+`ContentStatus`, ...) are open: a value added later parses as an
+`UNKNOWN` member that keeps the raw value.
 
 ## Contributing
 Pull requests are welcome. For significant changes, please open an issue first to discuss what you would like to change.
