@@ -604,6 +604,7 @@ except CrawlAPIError as exc:
 | 422 | `invalid_parameter`, `invalid_start_url`, `domain_not_allowed` | Fix the request. Do not retry it as is. |
 | 422 | `idempotency_key_reused` | Use a new key, or no key. Do not retry it as is. |
 | 429 | `too_many_crawls` | The account has reached its limit of active jobs (3 by default), shared with its Batch jobs. Retry after `exc.retry_after` seconds. `create` does not retry it. |
+| 503 | `crawl_busy` | `stop` could not be saved yet; the crawl is still running. `stop` retries it up to `retries` times, waiting `exc.retry_after` seconds, then raises it. Repeating the stop is safe. |
 
 `code` is None when the response has no problem body with a code (for
 example a 502 from a proxy). A crawl that ended `failed` is not an error
