@@ -113,11 +113,6 @@ class Crawl(BaseModel):
     finished_at: datetime | None = None
     """When the crawl reached a terminal status. Absent while it runs."""
 
-    @property
-    def is_terminal(self) -> bool:
-        """True once the crawl has ended (any status but `running`)."""
-        return self.status is not CrawlStatus.RUNNING
-
 
 class CrawlResult(BaseModel):
     """One URL the crawl kept."""

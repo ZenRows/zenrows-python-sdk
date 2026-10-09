@@ -100,7 +100,6 @@ def test_create_sends_only_required_fields(client: ZenRowsCrawlClient):
 
     assert crawl.crawl_id == "c_1"
     assert crawl.status is CrawlStatus.RUNNING
-    assert not crawl.is_terminal
     sent = route.calls.last.request
     assert sent.headers["X-API-Key"] == API_KEY
     assert sent.headers["Content-Type"] == "application/json"
@@ -173,7 +172,6 @@ def test_get_parses_results_and_open_enums(client: ZenRowsCrawlClient):
     assert route.calls.last.request.url.params["cursor"] == "cur_1"
     assert route.calls.last.request.url.params["limit"] == "50"
     assert page.status is CrawlStatus.COMPLETED
-    assert page.is_terminal
     assert page.stop_reason is StopReason.MAX_ITEMS
     assert is_unknown(page.output_format)  # type: ignore[arg-type]
     assert page.next_cursor is None
