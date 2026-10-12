@@ -51,6 +51,7 @@ packages = ["src/zenrows"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/zenrows", "README.md", "LICENSE"]
+exclude = ["/acceptance"]  # the acceptance test harness, never shipped
 
 # --- uv ---
 [tool.uv]
