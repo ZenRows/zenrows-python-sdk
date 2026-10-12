@@ -419,13 +419,22 @@ def c9():
     b = state.get("B")
     if not b:
         return SKIP, "no html crawl", ""
-    r = next((x for x in client.results(b.crawl_id) if x.content_url), None)
+    def first_fetched(crawl_id):
+        return next((x for x in client.results(crawl_id) if x.content_url), None)
+
+    # The stop in check 20 can land before any page is fetched. Then read a
+    # one-item html crawl that runs to the end instead.
+    src = b.crawl_id
+    r = first_fetched(src)
     if not r:
-        if (state.get("stop") or {}).get("status") == "stopped":
-            return SKIP, "the stop cancelled every page fetch, so no page has content to read (see check 20)", ""
-        return FAIL, "no result with content_url", ""
+        own = create(output_format="html", **{**BASE, "max_items": 1})
+        client.wait(own.crawl_id)
+        src = own.crawl_id
+        r = first_fetched(src)
+    if not r:
+        return FAIL, f"no result with content_url on {src}", ""
     cid = r.content_url.rstrip("/").rsplit("/", 1)[-1]
-    by_id, by_url = client.content(b.crawl_id, cid), client.content(b.crawl_id, r.content_url)
+    by_id, by_url = client.content(src, cid), client.content(src, r.content_url)
     ok = by_id == by_url and re.search(r"<html|<!doctype", by_id, re.I) is not None
     return pass_if(ok), f"by id {len(by_id)} chars, by content_url {len(by_url)} chars, equal {by_id == by_url}", ""
 
