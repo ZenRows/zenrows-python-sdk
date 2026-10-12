@@ -98,7 +98,9 @@ class Crawl(BaseModel):
     status: CrawlStatus
     url: str
     """The page the crawl started from."""
-    depth: int
+    depth: int | None = None
+    """Link hops the crawl follows from `url`. Absent when the crawl was
+    created without one: it has no depth limit."""
     max_items: int
     max_pages: int
     coverage: Coverage

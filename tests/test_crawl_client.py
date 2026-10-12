@@ -29,18 +29,20 @@ BASE_URL = "http://localhost:9100/v1"
 API_KEY = "test-key"
 
 
-def crawl_body(**overrides):
+def crawl_body(*, omit: tuple[str, ...] = (), **overrides):
     body = {
         "crawl_id": "c_1",
         "status": "running",
         "url": "https://example.com/",
         "depth": 1,
-        "max_items": 10,
-        "max_pages": 10,
+        "max_items": 100,
+        "max_pages": 100,
         "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0},
         "created_at": "2026-10-08T09:00:00Z",
     }
     body.update(overrides)
+    for key in omit:
+        del body[key]
     return body
 
 
@@ -93,18 +95,34 @@ def test_base_url_is_a_constructor_option_only(monkeypatch):
 @respx.mock
 def test_create_sends_only_required_fields(client: ZenRowsCrawlClient):
     route = respx.post(f"{BASE_URL}/crawls").mock(
-        return_value=Response(202, headers={"Location": "/v1/crawls/c_1"}, json=crawl_body())
+        return_value=Response(
+            202, headers={"Location": "/v1/crawls/c_1"}, json=crawl_body(omit=("depth",))
+        )
     )
 
-    crawl = client.create("https://example.com/", depth=1)
+    crawl = client.create("https://example.com/")
 
     assert crawl.crawl_id == "c_1"
     assert crawl.status is CrawlStatus.RUNNING
+    assert crawl.depth is None  # created without depth: no depth limit, none echoed
     sent = route.calls.last.request
     assert sent.headers["X-API-Key"] == API_KEY
     assert sent.headers["Content-Type"] == "application/json"
     assert "Idempotency-Key" not in sent.headers
-    assert json.loads(sent.content) == {"url": "https://example.com/", "depth": 1}
+    assert json.loads(sent.content) == {"url": "https://example.com/"}
+
+
+@respx.mock
+def test_create_sends_depth_when_given(client: ZenRowsCrawlClient):
+    route = respx.post(f"{BASE_URL}/crawls").mock(return_value=Response(202, json=crawl_body()))
+
+    crawl = client.create("https://example.com/", depth=1)
+
+    assert crawl.depth == 1
+    assert json.loads(route.calls.last.request.content) == {
+        "url": "https://example.com/",
+        "depth": 1,
+    }
 
 
 @respx.mock
@@ -213,7 +231,7 @@ def test_list_returns_one_page(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls").mock(
         side_effect=[
             Response(200, json={"crawls": [crawl_body(crawl_id="c_2")], "next_cursor": "n1"}),
-            Response(200, json={"crawls": [crawl_body(crawl_id="c_1")]}),
+            Response(200, json={"crawls": [crawl_body(crawl_id="c_1", omit=("depth",))]}),
         ]
     )
 
@@ -222,6 +240,8 @@ def test_list_returns_one_page(client: ZenRowsCrawlClient):
 
     assert [c.crawl_id for c in first.crawls] == ["c_2"]
     assert [c.crawl_id for c in last.crawls] == ["c_1"]
+    assert first.crawls[0].depth == 1
+    assert last.crawls[0].depth is None  # created without depth
     assert last.next_cursor is None
     assert dict(route.calls[0].request.url.params) == {"limit": "1"}
     assert route.calls[1].request.url.params["cursor"] == "n1"

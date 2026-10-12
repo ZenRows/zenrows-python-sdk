@@ -27,7 +27,7 @@ API_BASE = os.environ.get("CRAWL_API_BASE", "https://api.zenrows.com/v1")
 NO_MATCH = (
     "/crawl-acceptance-matches-nothing/"  # no URL contains it: the crawl keeps nothing (check 19)
 )
-DOCUMENTED_DEFAULT = 10  # the default the README documents for max_pages and max_items (check 21)
+DOCUMENTED_DEFAULT = 100  # the default the README documents for max_pages and max_items (check 21)
 RESULTS = "/results"
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 TERMINAL = {"completed", "stopped", "failed"}
@@ -219,20 +219,18 @@ class StandIn(http.server.BaseHTTPRequestHandler):
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(
-            json.dumps(
-                {
-                    "crawl_id": "c_capture",
-                    "status": "running",
-                    "url": body.get("url"),
-                    "depth": body.get("depth"),
-                    "max_items": 10,
-                    "max_pages": 10,
-                    "created_at": datetime.now(UTC).isoformat(),
-                    "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0},
-                }
-            ).encode()
-        )
+        crawl = {
+            "crawl_id": "c_capture",
+            "status": "running",
+            "url": body.get("url"),
+            "max_items": DOCUMENTED_DEFAULT,
+            "max_pages": DOCUMENTED_DEFAULT,
+            "created_at": datetime.now(UTC).isoformat(),
+            "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0},
+        }
+        if "depth" in body:  # as the API: a crawl created without depth omits it
+            crawl["depth"] = body["depth"]
+        self.wfile.write(json.dumps(crawl).encode())
 
     def do_GET(self):
         if "c_nobody" in self.path:
@@ -255,7 +253,7 @@ from zenrows.crawl import CrawlAPIError  # noqa: E402
 cap = ZenRowsCrawlClient(
     "capture-key", base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", retries=0
 )
-cap.create("https://example.com/", depth=1)
+minimal = cap.create("https://example.com/")  # depth is optional: no depth limit
 cap.create(
     "https://example.com/",
     depth=1,
@@ -264,8 +262,11 @@ cap.create(
     include_patterns=["/p/"],
     idempotency_key="idem-1",
 )
-sent_ok = sorted(captured[0]) == ["depth", "url"] and sorted(captured[1]) == sorted(
-    ["url", "depth", "max_items", "max_pages", "include_patterns"]
+sent_ok = (
+    sorted(captured[0]) == ["url"]
+    and minimal.depth is None
+    and sorted(captured[1])
+    == sorted(["url", "depth", "max_items", "max_pages", "include_patterns"])
 )
 sent_line = (
     f"sent (stand-in server): minimal={json.dumps(captured[0])} full={json.dumps(captured[1])}"

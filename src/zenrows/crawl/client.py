@@ -1,7 +1,8 @@
 """ZenRowsCrawlClient — the typed facade over the Crawl API (New).
 
-A crawl starts from one URL, follows links up to `depth` hops, and
-keeps the URLs that match its patterns, up to `max_items`. It runs as
+A crawl starts from one URL, follows links (up to `depth` hops when
+set), and keeps the URLs that match its patterns, up to `max_items`. It
+stops at `max_items` or `max_pages`, or when no link is left. It runs as
 a job: `create` returns at once with `status=running`, and the URLs
 grow as pages finish.
 
@@ -163,7 +164,7 @@ class ZenRowsCrawlClient:
         self,
         url: str,
         *,
-        depth: int,
+        depth: int | None = None,
         max_items: int | None = None,
         max_pages: int | None = None,
         include_patterns: list[str] | None = None,
@@ -174,10 +175,12 @@ class ZenRowsCrawlClient:
         """`POST /crawls` — start a crawl and return it, `running`.
 
         - `depth`: link hops to follow from `url` (1 to 100,000).
+          Omit it for no depth limit: the crawl follows links until
+          `max_items` or `max_pages` stops it, or no link is left.
         - `max_items`: stop after keeping this many URLs (server
-          default 10).
+          default 100).
         - `max_pages`: stop after fetching this many pages, which
-          bounds the cost (server default 10).
+          bounds the cost (server default 100).
         - `include_patterns` / `exclude_patterns`: substrings matched
           against each normalized URL. A URL is kept when it matches
           an include pattern (if any) and no exclude pattern. A crawl
@@ -192,8 +195,9 @@ class ZenRowsCrawlClient:
         Batch jobs, `create` raises 429 `too_many_crawls` without
         retrying; retry after the error's `retry_after` seconds.
         """
-        body: dict[str, Any] = {"url": url, "depth": depth}
+        body: dict[str, Any] = {"url": url}
         optional: dict[str, Any] = {
+            "depth": depth,
             "max_items": max_items,
             "max_pages": max_pages,
             "include_patterns": include_patterns,

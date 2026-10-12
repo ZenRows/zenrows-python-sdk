@@ -60,7 +60,7 @@ and signal checks.
 
 | # | Feature | Expected |
 | --- | --- | --- |
-| 1 | Create | returns at once: `running`, a `crawl_id`, the echoed parameters; only the fields set are sent |
+| 1 | Create | returns at once: `running`, a `crawl_id`, the echoed parameters; only the fields set are sent, and a create without `depth` sends none and reads back none |
 | 2 | Create with html | results get `content_status` and, once fetched, `content_url` |
 | 3 | Idempotency | same key and body → same `crawl_id`; different body → 422 `idempotency_key_reused` (MCP, CLI: `CRAWL_INVALID_REQUEST` with the advice to send a new key) |
 | 4 | Wait | returns the ended crawl; `failed` is returned, not raised (CLI: exit 1) |
@@ -80,17 +80,19 @@ and signal checks.
 | 18 | Copy | Crawl is "new", never "beta"; one "still evolving" line; the 429 limit reads as the account's active jobs, shared with Batch |
 | 19 | Failed crawl | an include pattern that matches nothing ends `failed` with `no_items_found`; SDKs return it, not raise it; MCP and CLI say `ok: false` (CLI: exit 1, `CRAWL_FAILED`) |
 | 20 | Results after stop | the html crawl is stopped while its pages are still being fetched: reading its results ends at once (MCP and CLI: `partial: false`, no note to call again), and the same URLs come back once the pages in flight finish |
-| 21 | Documented defaults | a create without `max_pages` and `max_items` gets the default the docs state (10) |
+| 21 | Documented defaults | a create without `max_pages` and `max_items` gets the default the docs state (100) |
 
 Extra checks for this surface: `mypy --strict` sees the package as typed (`py.typed`) and reads the real signatures.
 
 ## What it costs
 
-Every crawl uses `depth` 1 and `max_pages` 10 or less. A run starts five crawls: the README run,
+Every crawl uses `depth` 1. Every crawl but check 19's sets `max_pages` 10 or less; check 19's
+leaves it out so check 21 can read the default (100). A run starts five crawls: the README run,
 one URLs-only crawl, one idempotency crawl that is stopped at once, one html crawl that is
 stopped with its pages in flight (check 20), and one that keeps nothing (check 19). On the default `CRAWL_URL`, a URLs-only crawl fetches 1 page and the
-html crawl 6, so a run costs about **10 pages**, and at most 50 if every crawl reaches its
-`max_pages`. Check 9 starts a sixth crawl, one html item, when the stop in check 20 lands
+html crawl 6, so a run costs about **10 pages**. Check 19's crawl keeps nothing and fetches only
+the start page at `depth` 1, so its default of 100 does not raise the cost. At most 140 if every
+crawl reaches its `max_pages`. Check 9 starts a sixth crawl, one html item, when the stop in check 20 lands
 before any page is fetched. It adds at most 10 pages. The report lists each crawl id and its `pages_fetched`.
 
 An account can run 3 active jobs at once, shared with Batch jobs. A run has at most 2 crawls
