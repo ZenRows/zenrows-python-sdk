@@ -572,3 +572,19 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
     assert crawl.status is CrawlStatus.FAILED
     assert crawl.error is not None and crawl.error.code is CrawlErrorCode.NO_ITEMS_FOUND
     assert no_sleep == []
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "slept"), [("3600", 30.0), ("-1", 1.0), ("nan", 1.0), ("2", 2.0)]
+)
+@respx.mock
+def test_stop_waits_at_most_30_seconds_for_crawl_busy(no_sleep, retry_after: str, slept: float):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=1)
+    respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        side_effect=[
+            problem(503, "crawl_busy", headers={"Retry-After": retry_after}),
+            Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
+        ]
+    )
+    client.stop("c_1")
+    assert no_sleep == [slept]
