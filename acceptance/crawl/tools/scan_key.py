@@ -1,4 +1,5 @@
 """Fail the run if the API key appears in any file under out/. Reads the key from the env."""
+
 import os
 import sys
 

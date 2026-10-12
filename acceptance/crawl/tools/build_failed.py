@@ -1,4 +1,5 @@
 """Record a source or build failure as a FAIL result, so the report shows it."""
+
 import json
 import os
 import sys
@@ -13,5 +14,16 @@ for name in ("fetch.log", "build.log"):
 d = os.path.join(out, "results", "checks")
 os.makedirs(d, exist_ok=True)
 with open(os.path.join(d, "000-build.json"), "w") as f:
-    json.dump({"surface": surface, "check": "build", "title": "Build the release artifact", "status": "FAIL",
-               "expected": "the artifact builds", "actual": "the source or builder step failed", "evidence": log}, f, indent=2)
+    json.dump(
+        {
+            "surface": surface,
+            "check": "build",
+            "title": "Build the release artifact",
+            "status": "FAIL",
+            "expected": "the artifact builds",
+            "actual": "the source or builder step failed",
+            "evidence": log,
+        },
+        f,
+        indent=2,
+    )

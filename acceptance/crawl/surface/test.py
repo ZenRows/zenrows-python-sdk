@@ -24,7 +24,9 @@ HAS_KEY = bool(KEY)
 CRAWL_URL = os.environ["CRAWL_URL"]
 INCLUDE = os.environ["CRAWL_INCLUDE"]
 API_BASE = os.environ.get("CRAWL_API_BASE", "https://api.zenrows.com/v1")
-NO_MATCH = "/crawl-acceptance-matches-nothing/"  # no URL contains it: the crawl keeps nothing (check 19)
+NO_MATCH = (
+    "/crawl-acceptance-matches-nothing/"  # no URL contains it: the crawl keeps nothing (check 19)
+)
 DOCUMENTED_DEFAULT = 10  # the default the README documents for max_pages and max_items (check 21)
 RESULTS = "/results"
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
@@ -46,12 +48,20 @@ def trim(v, n):
 def record(check, title, status, expected, actual, evidence=""):
     global _seq
     _seq += 1
-    r = {"surface": SURFACE, "check": str(check), "title": title, "status": status, "expected": expected,
-         "actual": trim(actual, 800), "evidence": trim(evidence, 2500)}
+    r = {
+        "surface": SURFACE,
+        "check": str(check),
+        "title": title,
+        "status": status,
+        "expected": expected,
+        "actual": trim(actual, 800),
+        "evidence": trim(evidence, 2500),
+    }
     name = f"{_seq:03d}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(check))}.json"
     with open(f"{RESULTS}/checks/{name}", "w") as f:
         json.dump(r, f, indent=2)
-    print(f"[{status}] python {check} {title}: {r['actual'].splitlines()[0][:200] if r['actual'] else ''}", flush=True)
+    first = r["actual"].splitlines()[0][:200] if r["actual"] else ""
+    print(f"[{status}] python {check} {title}: {first}", flush=True)
 
 
 def pass_if(ok):
@@ -60,12 +70,16 @@ def pass_if(ok):
 
 def run_check(check, title, expected, fn, live=False):
     if live and not HAS_KEY:
-        return record(check, title, SKIP, expected, "ZENROWS_API_KEY not set (run without --no-key)")
+        return record(
+            check, title, SKIP, expected, "ZENROWS_API_KEY not set (run without --no-key)"
+        )
     try:
         status, actual, evidence = fn()
         record(check, title, status, expected, actual, evidence)
     except Exception as e:  # an unexpected exception is a FAIL with its traceback
-        record(check, title, FAIL, expected, f"raised {type(e).__name__}: {e}", traceback.format_exc())
+        record(
+            check, title, FAIL, expected, f"raised {type(e).__name__}: {e}", traceback.format_exc()
+        )
 
 
 def ledger(crawl_id, purpose):
@@ -96,22 +110,38 @@ def crawls_since(t):
 # ---------- README: install (run-in-container.sh) and the Crawl quickstart ----------
 with open(f"{RESULTS}/pip-install.log") as f:
     install_log = f.read()
-record("readme-1", "Install (README: `pip install zenrows`; here the release wheel)", PASS, "the package installs",
-       f"zenrows {metadata.version('zenrows')} installed", f"$ pip install <wheel>\n{install_log[-1200:]}")
+record(
+    "readme-1",
+    "Install (README: `pip install zenrows`; here the release wheel)",
+    PASS,
+    "the package installs",
+    f"zenrows {metadata.version('zenrows')} installed",
+    f"$ pip install <wheel>\n{install_log[-1200:]}",
+)
 
 readme = metadata.metadata("zenrows").get_payload() or ""
 HEADING = "## Quickstart — Crawl API (new)"
 section = readme.split(HEADING, 1)[1].split("\n## ", 1)[0] if HEADING in readme else ""
 m = re.search(r"```python\n(.*?)```", section, re.S)
 block = m.group(1) if m else None
-record("readme-2", "README has a Crawl quickstart", pass_if(bool(block)), "a ```python block under the Crawl quickstart",
-       f"{len(block.splitlines())} lines" if block else "not found", block or section[:600])
+record(
+    "readme-2",
+    "README has a Crawl quickstart",
+    pass_if(bool(block)),
+    "a ```python block under the Crawl quickstart",
+    f"{len(block.splitlines())} lines" if block else "not found",
+    block or section[:600],
+)
 
 subs = [
     ('"https://example.com/products/"', json.dumps(CRAWL_URL), "start URL → CRAWL_URL"),
     ("max_items=50,", "max_items=5,", "max_items 50 → 5"),
     ("max_pages=100,", "max_pages=10,", "max_pages 100 → 10 (at most 10)"),
-    ('include_patterns=["/product/"]', f"include_patterns=[{json.dumps(INCLUDE)}]", "include → CRAWL_INCLUDE"),
+    (
+        'include_patterns=["/product/"]',
+        f"include_patterns=[{json.dumps(INCLUDE)}]",
+        "include → CRAWL_INCLUDE",
+    ),
 ]
 quick, applied = block or "", []
 for a, b, why in subs:
@@ -131,26 +161,46 @@ def readme_run():
     mine = crawls_since(since)
     for i in mine:
         ledger(i, "README quickstart")
-    return pass_if(code == 0), f"exit {code}; crawls: {', '.join(mine) or 'none'}", \
-        f"substitutions: {'; '.join(applied)}\n$ python quickstart.py\n{out}"
+    return (
+        pass_if(code == 0),
+        f"exit {code}; crawls: {', '.join(mine) or 'none'}",
+        f"substitutions: {'; '.join(applied)}\n$ python quickstart.py\n{out}",
+    )
 
 
-run_check("readme-3", "Run the README Crawl quickstart", "it runs to the end without an error", readme_run, live=True)
+run_check(
+    "readme-3",
+    "Run the README Crawl quickstart",
+    "it runs to the end without an error",
+    readme_run,
+    live=True,
+)
 
 
 # ---------- extra: a typed package (py.typed) under mypy --strict ----------
 def mypy_check():
-    code, out = sh([sys.executable, "-m", "mypy", "--strict", "--no-incremental", "/harness/typecheck.py"])
-    untyped = "missing library stubs or py.typed" in out or "module is installed, but missing" in out
+    code, out = sh(
+        [sys.executable, "-m", "mypy", "--strict", "--no-incremental", "/harness/typecheck.py"]
+    )
+    untyped = (
+        "missing library stubs or py.typed" in out or "module is installed, but missing" in out
+    )
     revealed = "def (url: builtins.str" in out
     errors = [line for line in out.splitlines() if ": error:" in line]
-    return pass_if(not untyped and revealed and not errors), \
-        f"mypy exit {code}; py.typed seen {not untyped}; real signature revealed {revealed}; {len(errors)} errors", \
-        f"$ mypy --strict typecheck.py (mypy {metadata.version('mypy')})\n{out}"
+    return (
+        pass_if(not untyped and revealed and not errors),
+        f"mypy exit {code}; py.typed seen {not untyped}; "
+        f"real signature revealed {revealed}; {len(errors)} errors",
+        f"$ mypy --strict typecheck.py (mypy {metadata.version('mypy')})\n{out}",
+    )
 
 
-run_check("x-python-typed", "mypy --strict sees the package as typed (py.typed)", "no missing-stubs error; the real signatures",
-          mypy_check)
+run_check(
+    "x-python-typed",
+    "mypy --strict sees the package as typed (py.typed)",
+    "no missing-stubs error; the real signatures",
+    mypy_check,
+)
 
 # ---------- check 1, offline half: only the fields you set are sent ----------
 captured = []
@@ -169,10 +219,20 @@ class StandIn(http.server.BaseHTTPRequestHandler):
         self.send_response(201)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({
-            "crawl_id": "c_capture", "status": "running", "url": body.get("url"), "depth": body.get("depth"),
-            "max_items": 10, "max_pages": 10, "created_at": datetime.now(UTC).isoformat(),
-            "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0}}).encode())
+        self.wfile.write(
+            json.dumps(
+                {
+                    "crawl_id": "c_capture",
+                    "status": "running",
+                    "url": body.get("url"),
+                    "depth": body.get("depth"),
+                    "max_items": 10,
+                    "max_pages": 10,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0},
+                }
+            ).encode()
+        )
 
     def do_GET(self):
         if "c_nobody" in self.path:
@@ -192,12 +252,24 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 from zenrows import ZenRowsCrawlClient  # noqa: E402  (imported once installed, as a user would)
 from zenrows.crawl import CrawlAPIError  # noqa: E402
 
-cap = ZenRowsCrawlClient("capture-key", base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", retries=0)
+cap = ZenRowsCrawlClient(
+    "capture-key", base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", retries=0
+)
 cap.create("https://example.com/", depth=1)
-cap.create("https://example.com/", depth=1, max_items=5, max_pages=10, include_patterns=["/p/"], idempotency_key="idem-1")
-sent_ok = sorted(captured[0]) == ["depth", "url"] and \
-    sorted(captured[1]) == sorted(["url", "depth", "max_items", "max_pages", "include_patterns"])
-sent_line = f"sent (stand-in server): minimal={json.dumps(captured[0])} full={json.dumps(captured[1])}"
+cap.create(
+    "https://example.com/",
+    depth=1,
+    max_items=5,
+    max_pages=10,
+    include_patterns=["/p/"],
+    idempotency_key="idem-1",
+)
+sent_ok = sorted(captured[0]) == ["depth", "url"] and sorted(captured[1]) == sorted(
+    ["url", "depth", "max_items", "max_pages", "include_patterns"]
+)
+sent_line = (
+    f"sent (stand-in server): minimal={json.dumps(captured[0])} full={json.dumps(captured[1])}"
+)
 
 # ---------- live ----------
 client = ZenRowsCrawlClient(KEY or "none", base_url=API_BASE)
@@ -231,15 +303,28 @@ def esum(e):
 
 def c1():
     if not HAS_KEY:
-        return (SKIP if sent_ok else FAIL), f"live part skipped (no key); only set fields sent: {sent_ok}", sent_line
+        return (
+            (SKIP if sent_ok else FAIL),
+            f"live part skipped (no key); only set fields sent: {sent_ok}",
+            sent_line,
+        )
     t = time.time()
     a = state["A"] = create(**BASE)
-    echo = {"url": a.url, "depth": a.depth, "max_items": a.max_items, "max_pages": a.max_pages,
-            "include_patterns": a.include_patterns}
+    echo = {
+        "url": a.url,
+        "depth": a.depth,
+        "max_items": a.max_items,
+        "max_pages": a.max_pages,
+        "include_patterns": a.include_patterns,
+    }
     want = {"url": CRAWL_URL, **BASE}
     ok = sent_ok and a.status.value == "running" and a.crawl_id.startswith("c_") and echo == want
-    return pass_if(ok), f"{a.status.value}, {a.crawl_id}, {int((time.time() - t) * 1000)} ms, echo {json.dumps(echo)}; " \
-        f"only set fields sent: {sent_ok}", f"{a.model_dump_json()}\n{sent_line}"
+    return (
+        pass_if(ok),
+        f"{a.status.value}, {a.crawl_id}, {int((time.time() - t) * 1000)} ms, "
+        f"echo {json.dumps(echo)}; only set fields sent: {sent_ok}",
+        f"{a.model_dump_json()}\n{sent_line}",
+    )
 
 
 def c5():
@@ -272,9 +357,18 @@ def c3():
     v, e = err_of(lambda: client.create(CRAWL_URL, idempotency_key=key, **dict(body, max_items=4)))
     if v:
         ledger(v.crawl_id, "idempotency, different body (unexpected create)")
-    ok = c.crawl_id == again.crawl_id and e is not None and e.status_code == 422 and e.code == "idempotency_key_reused"
+    ok = (
+        c.crawl_id == again.crawl_id
+        and e is not None
+        and e.status_code == 422
+        and e.code == "idempotency_key_reused"
+    )
     third = f"{e.status_code} {e.code}" if e else f"created {v.crawl_id}"
-    return pass_if(ok), f"first {c.crawl_id}, second {again.crawl_id}; different body → {third}", json.dumps(esum(e))
+    return (
+        pass_if(ok),
+        f"first {c.crawl_id}, second {again.crawl_id}; different body → {third}",
+        json.dumps(esum(e)),
+    )
 
 
 def c11():
@@ -286,9 +380,18 @@ def c11():
     if first.status.value == "completed" and reason != "user":
         return SKIP, f"the crawl had already ended on its own ({first.status.value}/{reason})", ""
     second, e = err_of(lambda: client.stop(c.crawl_id))
-    ok = first.status.value == "stopped" and reason == "user" and e is None and second.status == first.status
+    ok = (
+        first.status.value == "stopped"
+        and reason == "user"
+        and e is None
+        and second.status == first.status
+    )
     two = f"error {e}" if e else second.status.value
-    return pass_if(ok), f"first: {first.status.value}/{reason}; second: {two}", first.model_dump_json()
+    return (
+        pass_if(ok),
+        f"first: {first.status.value}/{reason}; second: {two}",
+        first.model_dump_json(),
+    )
 
 
 def c4():
@@ -297,8 +400,11 @@ def c4():
         return SKIP, "no crawl from check 1", ""
     e = state["ended"] = client.wait(a.crawl_id)
     reason = f"/{e.stop_reason.value}" if e.stop_reason else ""
-    return pass_if(e.status.value in TERMINAL), f"{e.status.value}{reason}; coverage {e.coverage.model_dump_json()}", \
-        e.model_dump_json()
+    return (
+        pass_if(e.status.value in TERMINAL),
+        f"{e.status.value}{reason}; coverage {e.coverage.model_dump_json()}",
+        e.model_dump_json(),
+    )
 
 
 def c6():
@@ -314,10 +420,19 @@ def c6():
         cursor = p.next_cursor
     urls = [u for _, _, us in pages for u in us]
     curs = [c for _, c, _ in pages if c is not None]
-    ok = all(n <= 2 for n, _, _ in pages) and pages[-1][1] is None and len(set(curs)) == len(curs) \
-        and len(set(urls)) == len(urls) and (len(pages) >= 2 or e.coverage.items_found <= 2)
+    ok = (
+        all(n <= 2 for n, _, _ in pages)
+        and pages[-1][1] is None
+        and len(set(curs)) == len(curs)
+        and len(set(urls)) == len(urls)
+        and (len(pages) >= 2 or e.coverage.items_found <= 2)
+    )
     sizes = ",".join(str(n) for n, _, _ in pages)
-    return pass_if(ok), f"{len(pages)} pages of {sizes}; last next_cursor {pages[-1][1]}; {len(urls)} URLs", ""
+    return (
+        pass_if(ok),
+        f"{len(pages)} pages of {sizes}; last next_cursor {pages[-1][1]}; {len(urls)} URLs",
+        "",
+    )
 
 
 def c7():
@@ -332,8 +447,12 @@ def c7():
         cursor = client.list(limit=100, cursor=cursor).next_cursor
         pages += 1
     ok = len(p1.crawls) == 2 and newest and not overlap and not cursor
-    return pass_if(ok), f"newest first {newest}, no overlap {not overlap}; last page after {pages} pages: " \
-        f"next_cursor {json.dumps(cursor)}", ""
+    return (
+        pass_if(ok),
+        f"newest first {newest}, no overlap {not overlap}; last page after {pages} pages: "
+        f"next_cursor {json.dumps(cursor)}",
+        "",
+    )
 
 
 def c8():
@@ -343,11 +462,27 @@ def c8():
     urls = [r.url for r in client.results(e.crawl_id, limit=2)]
     distinct, match = len(set(urls)) == len(urls), all(INCLUDE in u for u in urls)
     p = state.get("partial")
-    run = (f"while running ({'running' if p[0] else 'already ended'}): {p[1]} URLs in {p[2]} ms, "
-           f"{'error ' + str(p[3]) if p[3] else 'returned'}") if p else "not read while running"
-    ok = bool(urls) and distinct and match and len(urls) == e.coverage.items_found and not (p and p[3])
-    return pass_if(ok), f"{len(urls)} URLs (items_found {e.coverage.items_found}), distinct {distinct}, " \
-        f"all match {match}; {run}", "\n".join(urls)
+    run = (
+        (
+            f"while running ({'running' if p[0] else 'already ended'}): {p[1]} URLs in {p[2]} ms, "
+            f"{'error ' + str(p[3]) if p[3] else 'returned'}"
+        )
+        if p
+        else "not read while running"
+    )
+    ok = (
+        bool(urls)
+        and distinct
+        and match
+        and len(urls) == e.coverage.items_found
+        and not (p and p[3])
+    )
+    return (
+        pass_if(ok),
+        f"{len(urls)} URLs (items_found {e.coverage.items_found}), distinct {distinct}, "
+        f"all match {match}; {run}",
+        "\n".join(urls),
+    )
 
 
 def settle(crawl_id):
@@ -361,7 +496,10 @@ def settle(crawl_id):
 
 
 def stop_mid_flight():
-    """Create the html crawl and stop it as soon as it has kept URLs, while their pages are fetched."""
+    """Create the html crawl and stop it as soon as it has kept URLs.
+
+    The stop lands while their pages are fetched.
+    """
     try:
         b = state["B"] = create(output_format="html", **BASE)
         g = None
@@ -385,11 +523,17 @@ def c20():
     t = time.time()
     box = {}
     # A daemon thread, so a results() that pages forever fails the check instead of hanging the run.
-    reader = threading.Thread(target=lambda: box.update(now=list(client.results(b.crawl_id))), daemon=True)
+    reader = threading.Thread(
+        target=lambda: box.update(now=list(client.results(b.crawl_id))), daemon=True
+    )
     reader.start()
     reader.join(60)
     if "now" not in box:
-        return FAIL, "results() did not finish within 60 s on a crawl stopped with pages in flight", ""
+        return (
+            FAIL,
+            "results() did not finish within 60 s on a crawl stopped with pages in flight",
+            "",
+        )
     now, ms = box["now"], int((time.time() - t) * 1000)
     settled = settle(b.crawl_id)
     if settled != "settled":
@@ -397,8 +541,12 @@ def c20():
     later = [r.url for r in client.results(b.crawl_id)]
     same = sorted(r.url for r in now) == sorted(later)
     pending = sum(1 for r in now if r.content_status and r.content_status.value == "pending")
-    return pass_if(same and bool(now)), f"stopped with {st['items']} kept; read {len(now)} URLs ({pending} pending) in {ms} ms, " \
-        f"then {settled}: {len(later)} URLs, same set {same}", ""
+    return (
+        pass_if(same and bool(now)),
+        f"stopped with {st['items']} kept; read {len(now)} URLs ({pending} pending) in {ms} ms, "
+        f"then {settled}: {len(later)} URLs, same set {same}",
+        "",
+    )
 
 
 def c2():
@@ -408,17 +556,28 @@ def c2():
     if (state.get("stop") or {}).get("status") == "stopped":
         settle(b.crawl_id)
     rs = list(client.results(b.crawl_id))
-    ok = b.output_format is not None and b.output_format.value == "html" and bool(rs) and all(
-        r.content_status and (r.content_status.value != "fetched" or r.content_url) for r in rs)
+    ok = (
+        b.output_format is not None
+        and b.output_format.value == "html"
+        and bool(rs)
+        and all(
+            r.content_status and (r.content_status.value != "fetched" or r.content_url) for r in rs
+        )
+    )
     with_url = sum(1 for r in rs if r.content_url)
-    return pass_if(ok), f"{b.crawl_id} ({(state.get('stop') or {}).get('status', '-')}); {len(rs)} results; " \
-        f"with content_url {with_url}", json.dumps([r.model_dump(mode="json") for r in rs[:2]])
+    return (
+        pass_if(ok),
+        f"{b.crawl_id} ({(state.get('stop') or {}).get('status', '-')}); {len(rs)} results; "
+        f"with content_url {with_url}",
+        json.dumps([r.model_dump(mode="json") for r in rs[:2]]),
+    )
 
 
 def c9():
     b = state.get("B")
     if not b:
         return SKIP, "no html crawl", ""
+
     def first_fetched(crawl_id):
         return next((x for x in client.results(crawl_id) if x.content_url), None)
 
@@ -436,7 +595,11 @@ def c9():
     cid = r.content_url.rstrip("/").rsplit("/", 1)[-1]
     by_id, by_url = client.content(src, cid), client.content(src, r.content_url)
     ok = by_id == by_url and re.search(r"<html|<!doctype", by_id, re.I) is not None
-    return pass_if(ok), f"by id {len(by_id)} chars, by content_url {len(by_url)} chars, equal {by_id == by_url}", ""
+    return (
+        pass_if(ok),
+        f"by id {len(by_id)} chars, by content_url {len(by_url)} chars, equal {by_id == by_url}",
+        "",
+    )
 
 
 def c10():
@@ -447,8 +610,12 @@ def c10():
         status = d.status.value if d.status else None
         lines = list(d.lines)
     fetched = [ln for ln in lines if ln.content_status and ln.content_status.value == "fetched"]
-    ok = status is not None and bool(lines) and all(ln.url and ln.content_status for ln in lines) and all(
-        isinstance(ln.content, str) and ln.content for ln in fetched)
+    ok = (
+        status is not None
+        and bool(lines)
+        and all(ln.url and ln.content_status for ln in lines)
+        and all(isinstance(ln.content, str) and ln.content for ln in fetched)
+    )
     return pass_if(ok), f"status {status}; {len(lines)} lines; {len(fetched)} with content", ""
 
 
@@ -458,7 +625,11 @@ errs = {}
 def c12():
     _, e = err_of(lambda: client.get("c_does_not_exist"))
     errs["not_found"] = e
-    return pass_if(e is not None and e.status_code == 404 and e.code == "crawl_not_found"), json.dumps(esum(e)), ""
+    return (
+        pass_if(e is not None and e.status_code == 404 and e.code == "crawl_not_found"),
+        json.dumps(esum(e)),
+        "",
+    )
 
 
 def c13():
@@ -467,8 +638,11 @@ def c13():
         ledger(v.crawl_id, "depth 0 (unexpected create)")
         client.stop(v.crawl_id)
     errs["invalid"] = e
-    return pass_if(e is not None and e.status_code == 422 and e.code == "invalid_parameter"), \
-        json.dumps(esum(e) or "created"), ""
+    return (
+        pass_if(e is not None and e.status_code == 422 and e.code == "invalid_parameter"),
+        json.dumps(esum(e) or "created"),
+        "",
+    )
 
 
 def c14():
@@ -476,9 +650,16 @@ def c14():
     if v:
         ledger(v.crawl_id, "output_format json (accepted)")
         client.stop(v.crawl_id)
-        return PASS, f"accepted ({v.crawl_id}): the key is in a beta segment, not a bug; stopped it", ""
-    return pass_if(e is not None and e.status_code == 422 and e.code == "invalid_parameter"), json.dumps(esum(e)), \
-        'output_format="json" (the hint allows only "html"; the value is sent as is)'
+        return (
+            PASS,
+            f"accepted ({v.crawl_id}): the key is in a beta segment, not a bug; stopped it",
+            "",
+        )
+    return (
+        pass_if(e is not None and e.status_code == 422 and e.code == "invalid_parameter"),
+        json.dumps(esum(e)),
+        'output_format="json" (the hint allows only "html"; the value is sent as is)',
+    )
 
 
 def c15():
@@ -492,8 +673,16 @@ def c16():
     _, none = err_of(lambda: cap.get("c_nobody"))
     rows = {k: (v.code if v else None) for k, v in errs.items()}
     rows["no_body_502"] = f"{none.status_code} code={none.code!r}" if none else "no error"
-    live_ok = not HAS_KEY or (rows.get("not_found") == "crawl_not_found" and rows.get("invalid") == "invalid_parameter")
-    ok = live_ok and bool(rows.get("bad_key")) and none is not None and none.status_code == 502 and none.code is None
+    live_ok = not HAS_KEY or (
+        rows.get("not_found") == "crawl_not_found" and rows.get("invalid") == "invalid_parameter"
+    )
+    ok = (
+        live_ok
+        and bool(rows.get("bad_key"))
+        and none is not None
+        and none.status_code == 502
+        and none.code is None
+    )
     status = (PASS if HAS_KEY else SKIP) if ok else FAIL
     return status, json.dumps(rows), "12, 13, 15, and a 502 with no body from the stand-in"
 
@@ -502,8 +691,17 @@ def c19():
     f = state["F"] = create(depth=1, include_patterns=[NO_MATCH])
     w = client.wait(f.crawl_id)
     err = w.error.model_dump(mode="json") if w.error else None
-    ok = w.status.value == "failed" and err is not None and err.get("code") == "no_items_found" and bool(err.get("detail"))
-    return pass_if(ok), f"{f.crawl_id}: {w.status.value}; error {json.dumps(err)}; returned, no exception", w.model_dump_json()
+    ok = (
+        w.status.value == "failed"
+        and err is not None
+        and err.get("code") == "no_items_found"
+        and bool(err.get("detail"))
+    )
+    return (
+        pass_if(ok),
+        f"{f.crawl_id}: {w.status.value}; error {json.dumps(err)}; returned, no exception",
+        w.model_dump_json(),
+    )
 
 
 def c21():
@@ -511,45 +709,163 @@ def c21():
     if not f:
         return SKIP, "no crawl from check 19", ""
     ok = f.max_pages == DOCUMENTED_DEFAULT and f.max_items == DOCUMENTED_DEFAULT
-    doc = [ln for ln in readme.splitlines() if "default" in ln.lower() and re.search(r"max_(pages|items)", ln)]
-    return pass_if(ok), f"the API applied max_pages {f.max_pages}, max_items {f.max_items}; documented {DOCUMENTED_DEFAULT}", \
-        "README lines on the defaults:\n" + ("\n".join(doc) or "(none)")
+    doc = [
+        ln
+        for ln in readme.splitlines()
+        if "default" in ln.lower() and re.search(r"max_(pages|items)", ln)
+    ]
+    return (
+        pass_if(ok),
+        f"the API applied max_pages {f.max_pages}, max_items {f.max_items}; "
+        f"documented {DOCUMENTED_DEFAULT}",
+        "README lines on the defaults:\n" + ("\n".join(doc) or "(none)"),
+    )
 
 
-run_check("1", "Create", "returns at once: running, a crawl_id, the echoed parameters; only the fields set are sent", c1)
-run_check("5", "Wait runs out", "wait with timeout 1 s on a running crawl returns it running, no error", c5, live=True)
+run_check(
+    "1",
+    "Create",
+    "returns at once: running, a crawl_id, the echoed parameters; only the fields set are sent",
+    c1,
+)
+run_check(
+    "5",
+    "Wait runs out",
+    "wait with timeout 1 s on a running crawl returns it running, no error",
+    c5,
+    live=True,
+)
 if HAS_KEY:
     partial_read()
-run_check("3", "Idempotency", "same key + body → same crawl_id; different body → 422 idempotency_key_reused", c3, live=True)
-run_check("11", "Stop", "running → stopped, stop_reason user; ended → answers as it ended, no error", c11, live=True)
-run_check("4", "Wait", "wait (default timeout) returns the ended crawl; failed is returned, not raised", c4, live=True)
-run_check("6", "Get", "limit 2 then the cursor: one page each; next_cursor moves on and is None on the last page", c6, live=True)
-run_check("7", "List", "limit 2 then the next page: newest first; next_cursor None on the last page", c7, live=True)
-run_check("8", "Results", "every kept URL once, each matching CRAWL_INCLUDE; on a running crawl, what is kept so far", c8,
-          live=True)
+run_check(
+    "3",
+    "Idempotency",
+    "same key + body → same crawl_id; different body → 422 idempotency_key_reused",
+    c3,
+    live=True,
+)
+run_check(
+    "11",
+    "Stop",
+    "running → stopped, stop_reason user; ended → answers as it ended, no error",
+    c11,
+    live=True,
+)
+run_check(
+    "4",
+    "Wait",
+    "wait (default timeout) returns the ended crawl; failed is returned, not raised",
+    c4,
+    live=True,
+)
+run_check(
+    "6",
+    "Get",
+    "limit 2 then the cursor: one page each; next_cursor moves on and is None on the last page",
+    c6,
+    live=True,
+)
+run_check(
+    "7",
+    "List",
+    "limit 2 then the next page: newest first; next_cursor None on the last page",
+    c7,
+    live=True,
+)
+run_check(
+    "8",
+    "Results",
+    "every kept URL once, each matching CRAWL_INCLUDE; on a running crawl, what is kept so far",
+    c8,
+    live=True,
+)
 if HAS_KEY:
     stop_mid_flight()
-run_check("20", "Results after stop", "results on a crawl stopped with pages in flight end without looping, and lose no URL", c20,
-          live=True)
-run_check("2", "Create with html", "results get content_status and, once fetched, content_url", c2, live=True)
-run_check("9", "Content", "content by content id, then by content_url: the same HTML", c9, live=True)
-run_check("10", "Download", "a status and one line per result, each with url, content_status, content", c10, live=True)
+run_check(
+    "20",
+    "Results after stop",
+    "results on a crawl stopped with pages in flight end without looping, and lose no URL",
+    c20,
+    live=True,
+)
+run_check(
+    "2",
+    "Create with html",
+    "results get content_status and, once fetched, content_url",
+    c2,
+    live=True,
+)
+run_check(
+    "9", "Content", "content by content id, then by content_url: the same HTML", c9, live=True
+)
+run_check(
+    "10",
+    "Download",
+    "a status and one line per result, each with url, content_status, content",
+    c10,
+    live=True,
+)
 run_check("12", "Not found", "get c_does_not_exist → 404 crawl_not_found", c12, live=True)
 run_check("13", "Invalid input", "create with depth 0 → 422 invalid_parameter", c13, live=True)
-run_check("14", "Gated option", "output_format json → 422 invalid_parameter for a customer key", c14, live=True)
+run_check(
+    "14",
+    "Gated option",
+    "output_format json → 422 invalid_parameter for a customer key",
+    c14,
+    live=True,
+)
 run_check("15", "Bad key", "any call with the key `invalid` → 401", c15)
-run_check("16", "Errors carry the server code", "code holds the server code; None when the body has none", c16)
+run_check(
+    "16",
+    "Errors carry the server code",
+    "code holds the server code; None when the body has none",
+    c16,
+)
 srv.shutdown()
-run_check("19", "Failed crawl", "a crawl that keeps nothing ends failed (no_items_found); wait returns it, not raises", c19,
-          live=True)
-run_check("21", "Documented defaults", f"a create without max_pages and max_items echoes the documented default "
-          f"({DOCUMENTED_DEFAULT})", c21, live=True)
+run_check(
+    "19",
+    "Failed crawl",
+    "a crawl that keeps nothing ends failed (no_items_found); wait returns it, not raises",
+    c19,
+    live=True,
+)
+run_check(
+    "21",
+    "Documented defaults",
+    f"a create without max_pages and max_items echoes the documented default "
+    f"({DOCUMENTED_DEFAULT})",
+    c21,
+    live=True,
+)
 
 with open(f"{RESULTS}/naming.json", "w") as f:
-    json.dump({"operations": {k: k for k in ["create", "get", "list", "results", "content", "download", "stop", "wait"]},
-               "params": {k: k for k in ["url", "depth", "max_items", "max_pages", "include_patterns", "exclude_patterns",
-                                         "output_format", "idempotency_key", "cursor", "limit", "timeout",
-                                         "content_id"]}}, f, indent=2)
+    json.dump(
+        {
+            "operations": {
+                k: k
+                for k in ["create", "get", "list", "results", "content", "download", "stop", "wait"]
+            },
+            "params": {
+                k: k
+                for k in [
+                    "url",
+                    "depth",
+                    "max_items",
+                    "max_pages",
+                    "include_patterns",
+                    "exclude_patterns",
+                    "output_format",
+                    "idempotency_key",
+                    "cursor",
+                    "limit",
+                    "timeout",
+                    "content_id",
+                ]
+            },
+        },
+        f,
+        indent=2,
+    )
 record("17", "Naming", SKIP, "the API's names in this surface's casing", "computed by the report")
 
 
@@ -557,7 +873,11 @@ def c18():
     problems = []
     lines = section.splitlines()
     beta = [ln for ln in lines if re.search(r"\bbeta\b", ln, re.I)]
-    beta += [ln for ln in readme.splitlines() if "ZenRowsCrawlClient" in ln and re.search(r"\bbeta\b", ln, re.I)]
+    beta += [
+        ln
+        for ln in readme.splitlines()
+        if "ZenRowsCrawlClient" in ln and re.search(r"\bbeta\b", ln, re.I)
+    ]
     evolving = [ln for ln in readme.splitlines() if "still evolving" in ln.lower()]
     limit = [ln for ln in lines if "active jobs" in ln.lower()]
     if beta:
@@ -565,17 +885,29 @@ def c18():
     if len(evolving) != 1:
         problems.append(f'{len(evolving)} "still evolving" lines in the README (want 1)')
     if not any("batch" in ln.lower() for ln in limit):
-        problems.append("no line reads the 429 limit as the account's active jobs, shared with Batch")
+        problems.append(
+            "no line reads the 429 limit as the account's active jobs, shared with Batch"
+        )
     if "Crawl API (new)" not in readme:
         problems.append('the Crawl section does not say "new"')
     import zenrows.crawl as zc
 
-    if any(re.search(r"\bbeta\b", d or "", re.I) for d in (zc.__doc__, zc.ZenRowsCrawlClient.__doc__)):
+    if any(
+        re.search(r"\bbeta\b", d or "", re.I) for d in (zc.__doc__, zc.ZenRowsCrawlClient.__doc__)
+    ):
         problems.append('"beta" in the crawl module docstrings')
-    return pass_if(not problems), "; ".join(problems) or 'README: "new", 1 "still evolving" line, 429 wording ok', \
-        "still evolving: " + " | ".join(evolving) + "\n429: " + " | ".join(limit)
+    return (
+        pass_if(not problems),
+        "; ".join(problems) or 'README: "new", 1 "still evolving" line, 429 wording ok',
+        "still evolving: " + " | ".join(evolving) + "\n429: " + " | ".join(limit),
+    )
 
 
-run_check("18", "Copy", 'Crawl is "new", never "beta"; one "still evolving" line; the 429 limit is active jobs shared '
-          "with Batch", c18)
+run_check(
+    "18",
+    "Copy",
+    'Crawl is "new", never "beta"; one "still evolving" line; the 429 limit is active jobs shared '
+    "with Batch",
+    c18,
+)
 print("python: done")

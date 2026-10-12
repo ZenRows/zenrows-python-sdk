@@ -20,14 +20,14 @@ typecheck:
 
 # Lint + format + type check (CI mode — no fixes).
 check: typecheck
-	uv run ruff check src/ tests/
-	uv run ruff format --check src/ tests/
+	uv run ruff check src/ tests/ acceptance/
+	uv run ruff format --check src/ tests/ acceptance/
 
 # Lint + format (writes fixes).
 lint:
-	uv run ruff check --fix src/ tests/
+	uv run ruff check --fix src/ tests/ acceptance/
 format:
-	uv run ruff format src/ tests/
+	uv run ruff format src/ tests/ acceptance/
 
 # Regenerate the pydantic v2 models from the backend's canonical spec.
 # docs/openapi.yaml is the SDK-local copy of the spec; refresh it from the
