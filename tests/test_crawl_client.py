@@ -556,3 +556,11 @@ def test_crawl_api_error_imports_from_the_package_root():
     from zenrows.crawl import CrawlAPIError as FromCrawl
 
     assert zenrows.CrawlAPIError is FromCrawl
+
+
+@respx.mock
+def test_content_takes_content_id_by_keyword(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls/c_1/contents/ct_9").mock(
+        return_value=Response(200, text="<html></html>")
+    )
+    assert client.content("c_1", content_id="/v1/crawls/c_1/contents/ct_9") == "<html></html>"
