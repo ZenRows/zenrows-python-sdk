@@ -525,3 +525,27 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
     assert crawl.status is CrawlStatus.FAILED
     assert crawl.error is not None and crawl.error.code is CrawlErrorCode.NO_ITEMS_FOUND
     assert no_sleep == []
+
+
+@respx.mock
+def test_retry_after_above_30_seconds_waits_30_seconds(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            problem(429, "rate_limited", headers={"Retry-After": "3600"}),
+            Response(200, json=crawl_body(status="completed", results=[], next_cursor=None)),
+        ]
+    )
+    client.get("c_1")
+    assert no_sleep == [30.0]
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "soon"])
+@respx.mock
+def test_an_unusable_retry_after_is_not_reported(client: ZenRowsCrawlClient, raw: str):
+    respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=problem(429, "too_many_crawls", headers={"Retry-After": raw})
+    )
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.create("https://example.com/", depth=1)
+    assert exc_info.value.retry_after is None
