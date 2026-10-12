@@ -588,3 +588,42 @@ def test_stop_waits_at_most_30_seconds_for_crawl_busy(no_sleep, retry_after: str
     )
     client.stop("c_1")
     assert no_sleep == [slept]
+
+
+@respx.mock
+def test_retry_after_above_30_seconds_waits_30_seconds(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            problem(429, "rate_limited", headers={"Retry-After": "3600"}),
+            Response(200, json=crawl_body(status="completed", results=[], next_cursor=None)),
+        ]
+    )
+    client.get("c_1")
+    assert no_sleep == [30.0]
+
+
+@pytest.mark.parametrize("raw", ["-1", "nan", "inf", "soon"])
+@respx.mock
+def test_an_unusable_retry_after_is_not_reported(client: ZenRowsCrawlClient, raw: str):
+    respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=problem(429, "too_many_crawls", headers={"Retry-After": raw})
+    )
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.create("https://example.com/", depth=1)
+    assert exc_info.value.retry_after is None
+
+
+def test_crawl_api_error_imports_from_the_package_root():
+    import zenrows
+    from zenrows.crawl import CrawlAPIError as FromCrawl
+
+    assert zenrows.CrawlAPIError is FromCrawl
+
+
+@respx.mock
+def test_content_takes_content_id_by_keyword(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls/c_1/contents/ct_9").mock(
+        return_value=Response(200, text="<html></html>")
+    )
+    assert client.content("c_1", content_id="/v1/crawls/c_1/contents/ct_9") == "<html></html>"

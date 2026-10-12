@@ -5,6 +5,8 @@ stable `code`. Branch on
 `status_code` + `code`; display `detail`, don't parse it.
 """
 
+import math
+
 import httpx
 
 from zenrows.batch.errors import ProblemDetail
@@ -56,6 +58,9 @@ class CrawlAPIError(Exception):
         try:
             retry_after: float | None = float(response.headers.get("Retry-After", ""))
         except ValueError:
+            retry_after = None
+        # A negative, NaN or infinite value is no wait a caller can sleep for.
+        if retry_after is not None and (not math.isfinite(retry_after) or retry_after < 0):
             retry_after = None
         return cls(
             status_code=response.status_code,

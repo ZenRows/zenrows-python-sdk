@@ -16,6 +16,12 @@ Three clients live here:
 from zenrows.__version__ import __version__
 from zenrows.batch import ZenRowsBatchClient
 from zenrows.client import ZenRowsClient
-from zenrows.crawl import ZenRowsCrawlClient
+from zenrows.crawl import CrawlAPIError, ZenRowsCrawlClient
 
-__all__ = ["ZenRowsBatchClient", "ZenRowsClient", "ZenRowsCrawlClient", "__version__"]
+__all__ = [
+    "CrawlAPIError",
+    "ZenRowsBatchClient",
+    "ZenRowsClient",
+    "ZenRowsCrawlClient",
+    "__version__",
+]

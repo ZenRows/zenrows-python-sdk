@@ -12,6 +12,7 @@ retry policy.
 
 import json
 import logging
+import math
 import random
 import time
 from collections.abc import Callable, Iterator
@@ -40,6 +41,9 @@ _IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE", "HEAD", "OPTIONS"})
 # capped at 10s.
 _BACKOFF_BASE_MS = 250
 _BACKOFF_CAP_MS = 10_000
+# A `Retry-After` above this waits only this long, so a large server value
+# cannot hang a call.
+_RETRY_AFTER_CAP_MS = 30_000
 _DEFAULT_RETRIES = 3
 
 
@@ -54,7 +58,8 @@ def _backoff_ms(attempt: int) -> float:
 
 
 def _retry_after_ms(response: httpx.Response) -> float | None:
-    """Parse a `Retry-After` header (delta-seconds only) to milliseconds."""
+    """Parse a `Retry-After` header (delta-seconds only) to milliseconds,
+    at most `_RETRY_AFTER_CAP_MS`."""
     raw = response.headers.get("Retry-After")
     if not raw:
         return None
@@ -62,7 +67,9 @@ def _retry_after_ms(response: httpx.Response) -> float | None:
         secs = float(raw)
     except ValueError:
         return None
-    return secs * 1000 if secs >= 0 else None
+    if not math.isfinite(secs) or secs < 0:
+        return None
+    return min(secs * 1000, _RETRY_AFTER_CAP_MS)
 
 
 class _Transport:
@@ -124,7 +131,7 @@ class _Transport:
 
         Retries `retry_statuses` (default `{429, 502, 503, 504}`) and
         transient network errors up to `retries` times, with jittered
-        exponential backoff (honoring `Retry-After` when present). Only
+        exponential backoff (honoring `Retry-After` up to 30s). Only
         idempotent requests are replayed — `GET`/`PUT`/`DELETE`/`HEAD`/
         `OPTIONS`, plus `POST` when the caller supplied an
         `Idempotency-Key`. Our own timeouts (`httpx.TimeoutException`)

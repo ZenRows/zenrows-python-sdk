@@ -290,25 +290,25 @@ class ZenRowsCrawlClient:
 
     # ===== contents =====
 
-    def content(self, crawl_id: str, content: str | CrawlResult) -> str:
+    def content(self, crawl_id: str, content_id: str | CrawlResult) -> str:
         """`GET /crawls/{crawl_id}/contents/{content_id}` — one kept
         URL's page, as HTML text.
 
-        `content` is a `CrawlResult` whose `content_status` is
+        `content_id` is a `CrawlResult` whose `content_status` is
         `fetched`, its `content_url`, or its content id (the last
         segment of the `content_url`). Only crawls created with an
         `output_format` have contents; anything else is 404
         `content_not_found`.
         """
-        if isinstance(content, CrawlResult):
-            if not content.content_url:
+        if isinstance(content_id, CrawlResult):
+            if not content_id.content_url:
                 raise ValueError(
-                    f"content: {content.url} has no content_url "
-                    f"(content_status={content.content_status})"
+                    f"content: {content_id.url} has no content_url "
+                    f"(content_status={content_id.content_status})"
                 )
-            content = content.content_url
-        content_id = content.rstrip("/").rsplit("/", 1)[-1]
-        return self._t.request("GET", f"/crawls/{crawl_id}/contents/{content_id}").text
+            content_id = content_id.content_url
+        segment = content_id.rstrip("/").rsplit("/", 1)[-1]
+        return self._t.request("GET", f"/crawls/{crawl_id}/contents/{segment}").text
 
     def download(self, crawl_id: str) -> CrawlDownload:
         """`GET /crawls/{crawl_id}/download` — open the NDJSON file and
