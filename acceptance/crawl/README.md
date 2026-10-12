@@ -69,7 +69,7 @@ and signal checks.
 | 7 | List | `limit` 2, then the next page: newest first; `next_cursor` absent or null on the last page |
 | 8 | Results | every kept URL once, each matching `CRAWL_INCLUDE`; on a running crawl, what is kept so far (MCP, CLI: `partial: true`) |
 | 9 | Content | by content id and by `content_url`: the same HTML |
-| 10 | Download | a status, and one line per result with `url`, `content_status`, `content` (MCP has no download) |
+| 10 | Download | a status, and one line per result with `url`, `content_status`, `content` |
 | 11 | Stop | running → `stopped`, `stop_reason: user`; ended → answers as it ended |
 | 12 | Not found | 404 `crawl_not_found` (MCP, CLI: `CRAWL_NOT_FOUND` with `crawl_id` and `server_code`) |
 | 13 | Invalid input | `depth` 0 → 422 `invalid_parameter` (MCP, CLI: `CRAWL_INVALID_REQUEST`) |
@@ -90,7 +90,8 @@ Every crawl uses `depth` 1 and `max_pages` 10 or less. A run starts five crawls:
 one URLs-only crawl, one idempotency crawl that is stopped at once, one html crawl that is
 stopped with its pages in flight (check 20), and one that keeps nothing (check 19). On the default `CRAWL_URL`, a URLs-only crawl fetches 1 page and the
 html crawl 6, so a run costs about **10 pages**, and at most 50 if every crawl reaches its
-`max_pages`. The report lists each crawl id and its `pages_fetched`.
+`max_pages`. Check 9 starts a sixth crawl, one html item, when the stop in check 20 lands
+before any page is fetched. It adds at most 10 pages. The report lists each crawl id and its `pages_fetched`.
 
 An account can run 3 active jobs at once, shared with Batch jobs. A run has at most 2 crawls
 running at a time. If a create still gets a 429, the run waits `Retry-After` and tries again.
