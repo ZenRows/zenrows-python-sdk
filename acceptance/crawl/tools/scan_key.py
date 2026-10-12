@@ -3,9 +3,12 @@ import os
 import sys
 
 key = os.environ.get("ZENROWS_API_KEY", "").encode()
+# The copy of the source under test holds the repo, not anything the run wrote.
+source_dir = os.path.join(sys.argv[1], "build", "source")
 hits = []
-for root, _, files in os.walk(sys.argv[1]):
-    if os.sep + "build" in root:
+for root, dirs, files in os.walk(sys.argv[1]):
+    if root == source_dir:
+        dirs.clear()
         continue
     for f in files:
         p = os.path.join(root, f)

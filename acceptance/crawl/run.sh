@@ -51,7 +51,7 @@ prepare_source() {
     # Tracked and untracked-but-not-ignored files, as a release build would see them.
     (cd "$root" && git ls-files -co --exclude-standard -z | tar --null -T - -cf -) | tar -C "$OUT_DIR/build/source" -xf -
     local sha; sha="$(git -C "$root" rev-parse HEAD)"
-    if [ -n "$(git -C "$root" status --porcelain -- . ":(exclude)$(realpath --relative-to="$root" "$HERE")")" ]; then
+    if [ -n "$(git -C "$root" status --porcelain -- . ":(exclude)$(git -C "$HERE" rev-parse --show-prefix)")" ]; then
       sha="$sha+local-changes"
     fi
     echo "$sha" >"$OUT_DIR/build/sha"
@@ -64,41 +64,25 @@ prepare_source() {
 # ---- 2. Builder: the release artifact, in its own container ----
 build_artifact() {
   mkdir -p "$OUT_DIR/build/artifact"
-  case "$SURFACE" in
-    node|mcp|cli)
-      log "build: npm pack"
-      docker_run -v "$OUT_DIR/build:/out" -v "$HERE/builders:/builders:ro" \
-        -e SURFACE -e PNPM_VERSION "$NODE_IMAGE" bash /builders/build-npm.sh >"$OUT_DIR/build/build.log" 2>&1 ;;
-    python)
-      log "build: the wheel"
-      docker_run -v "$OUT_DIR/build:/out" -v "$HERE/builders:/builders:ro" \
-        -e PY_BUILD_VERSION "$PYTHON_IMAGE" bash /builders/build-python.sh >"$OUT_DIR/build/build.log" 2>&1 ;;
-    go)
-      # Go has no artifact: the clean container runs `go get` at a pushed commit, as a user would.
-      local sha; sha="$(cat "$OUT_DIR/build/sha")"
-      case "$sha" in *+local-changes)
-        log "go: local changes are not tested; go get installs the commit ${sha%+local-changes} from GitHub" ;;
-      esac
-      echo "${sha%+local-changes}" >"$OUT_DIR/build/go_ref" ;;
-  esac
+  log "build: the wheel"
+  docker_run -v "$OUT_DIR/build:/out" -v "$HERE/builders:/builders:ro" \
+    -e PY_BUILD_VERSION "$PYTHON_IMAGE" bash /builders/build-python.sh >"$OUT_DIR/build/build.log" 2>&1
 }
 
 # ---- 3. Clean test container: only the artifact, the checks and the inputs go in ----
 run_checks() {
   rm -rf "$OUT_DIR/results"; mkdir -p "$OUT_DIR/results"
-  local image
-  case "$SURFACE" in node|mcp|cli) image="$NODE_IMAGE" ;; python) image="$PYTHON_IMAGE" ;; go) image="$GO_IMAGE" ;; esac
-  log "checks: a clean $image"
+  log "checks: a clean $PYTHON_IMAGE"
   local rc=0
   docker_run --init \
     -v "$OUT_DIR/build/artifact:/artifact:ro" \
     -v "$HERE/surface:/harness:ro" \
     -v "$OUT_DIR/results:/results" \
     -e ZENROWS_API_KEY -e CRAWL_URL -e CRAWL_INCLUDE -e CRAWL_API_BASE \
-    -e SURFACE -e GO_REF="$(cat "$OUT_DIR/build/go_ref" 2>/dev/null || true)" \
+    -e SURFACE \
     -e MCP_SDK_VERSION -e TYPESCRIPT_VERSION -e MYPY_VERSION \
     -w /work --tmpfs /work:exec,size=2g \
-    "$image" bash /harness/run-in-container.sh >"$OUT_DIR/results/container.log" 2>&1 || rc=$?
+    "$PYTHON_IMAGE" bash /harness/run-in-container.sh >"$OUT_DIR/results/container.log" 2>&1 || rc=$?
   log "checks: the container exited $rc (out/results/container.log)"
 }
 
