@@ -539,7 +539,8 @@ run_check("21", "Documented defaults", f"a create without max_pages and max_item
 with open(f"{RESULTS}/naming.json", "w") as f:
     json.dump({"operations": {k: k for k in ["create", "get", "list", "results", "content", "download", "stop", "wait"]},
                "params": {k: k for k in ["url", "depth", "max_items", "max_pages", "include_patterns", "exclude_patterns",
-                                         "output_format", "idempotency_key", "cursor", "limit", "timeout"]}}, f, indent=2)
+                                         "output_format", "idempotency_key", "cursor", "limit", "timeout",
+                                         "content_id"]}}, f, indent=2)
 record("17", "Naming", SKIP, "the API's names in this surface's casing", "computed by the report")
 
 

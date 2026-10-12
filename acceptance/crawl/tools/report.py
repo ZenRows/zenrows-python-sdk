@@ -23,7 +23,7 @@ CHECK_TITLES = {
 # The API's operation and parameter names. Each surface uses them in its own casing.
 CANON_OPS = ["create", "get", "list", "results", "content", "download", "stop", "wait"]
 CANON_PARAMS = ["url", "depth", "max_items", "max_pages", "include_patterns", "exclude_patterns", "output_format",
-                "idempotency_key", "cursor", "limit", "timeout"]
+                "idempotency_key", "cursor", "limit", "timeout", "content_id"]
 
 
 def read(path, default=None):
