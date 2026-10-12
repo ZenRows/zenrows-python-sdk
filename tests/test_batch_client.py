@@ -97,6 +97,7 @@ def test_problem_without_code_falls_back_to_internal(client: ZenRowsBatchClient)
     with pytest.raises(BatchAPIError) as exc_info:
         client.get_job("missing")
     assert exc_info.value.code == "internal"
+    assert exc_info.value.problem.code == "internal"
     assert str(exc_info.value) == "500 Server error: internal"
 
 

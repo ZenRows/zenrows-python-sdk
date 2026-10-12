@@ -5,6 +5,7 @@ stable `code`. Branch on
 `status_code` + `code`; display `detail`, don't parse it.
 """
 
+import json
 import math
 
 import httpx
@@ -14,6 +15,16 @@ from zenrows.batch.errors import ProblemDetail
 # The code of the 403 answer to a key whose account does not have
 # Crawl enabled.
 CRAWL_NOT_ENABLED_CODE = "REQS008"
+
+
+def _problem_code(raw: bytes) -> str | None:
+    # Read from the body: Batch's `ProblemDetail.code` defaults a missing
+    # code to "internal".
+    try:
+        code = json.loads(raw).get("code")
+    except (ValueError, AttributeError):
+        return None
+    return code if isinstance(code, str) else None
 
 
 class CrawlAPIError(Exception):
@@ -40,14 +51,14 @@ class CrawlAPIError(Exception):
         self.retry_after = retry_after
         self.problem = problem
         self.raw = raw
-        self.code: str | None = problem.code if problem else None
+        self.code: str | None = _problem_code(raw) if problem else None
         self.detail: str | None = problem.detail if problem else None
         if problem and self.code == CRAWL_NOT_ENABLED_CODE:
             msg = f"{status_code} Crawl is not enabled for this account ({self.code})" + (
                 f": {problem.detail}" if problem.detail else ""
             )
         elif problem:
-            reason = problem.detail or problem.code
+            reason = problem.detail or self.code
             msg = f"{status_code} {problem.title}" + (f": {reason}" if reason else "")
         else:
             msg = f"{status_code} (no problem body)"
