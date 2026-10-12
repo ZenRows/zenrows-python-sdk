@@ -18,6 +18,7 @@ retries, problem+json mapping), which raises `CrawlAPIError`.
 
 import json
 import logging
+import math
 import random
 import time
 from collections.abc import Callable, Iterator
@@ -50,6 +51,9 @@ _CREATE_RETRY_STATUSES = _RETRYABLE_STATUSES - {429}
 # 503 `crawl_busy` on stop: nothing was saved and the crawl is still
 # running, so the stop is safe to repeat after `Retry-After`.
 _CRAWL_BUSY = "crawl_busy"
+# The longest a crawl_busy `Retry-After` may make a stop wait, so a large
+# server value cannot hang it.
+_MAX_STOP_RETRY_AFTER = 30.0
 
 _POLL_INTERVAL = 2.0
 _POLL_BACKOFF = 1.5
@@ -270,7 +274,7 @@ class ZenRowsCrawlClient:
 
         A 503 `crawl_busy` means the stop was not saved and the crawl is
         still running; `stop` retries it up to `retries` times, waiting
-        `Retry-After` seconds each time, then raises it.
+        `Retry-After` seconds (at most 30) each time, then raises it.
         """
         attempt = 0
         while True:
@@ -281,7 +285,7 @@ class ZenRowsCrawlClient:
             except CrawlAPIError as err:
                 if err.status_code != 503 or err.code != _CRAWL_BUSY or attempt >= self._retries:
                     raise
-                time.sleep(err.retry_after if err.retry_after is not None else 1.0)
+                time.sleep(_stop_retry_wait(err.retry_after))
                 attempt += 1
 
     # ===== contents =====
@@ -340,6 +344,14 @@ class ZenRowsCrawlClient:
                 return crawl
             time.sleep(min(interval * random.uniform(0.8, 1.2), remaining))
             interval = min(interval * _POLL_BACKOFF, _MAX_POLL_INTERVAL)
+
+
+def _stop_retry_wait(retry_after: float | None) -> float:
+    """Seconds `stop` waits after a 503 crawl_busy: the server's
+    `Retry-After`, 1s when it is missing or unusable, at most 30s."""
+    if retry_after is None or not math.isfinite(retry_after) or retry_after < 0:
+        return 1.0
+    return min(retry_after, _MAX_STOP_RETRY_AFTER)
 
 
 def _crawl_status(response: httpx.Response) -> CrawlStatus | None:
