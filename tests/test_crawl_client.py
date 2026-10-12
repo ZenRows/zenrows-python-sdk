@@ -549,3 +549,10 @@ def test_an_unusable_retry_after_is_not_reported(client: ZenRowsCrawlClient, raw
     with pytest.raises(CrawlAPIError) as exc_info:
         client.create("https://example.com/", depth=1)
     assert exc_info.value.retry_after is None
+
+
+def test_crawl_api_error_imports_from_the_package_root():
+    import zenrows
+    from zenrows.crawl import CrawlAPIError as FromCrawl
+
+    assert zenrows.CrawlAPIError is FromCrawl

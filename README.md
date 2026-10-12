@@ -511,7 +511,7 @@ from zenrows import ZenRowsCrawlClient
 client = ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])
 
 crawl = client.create(
-    "https://example.com/products/",
+    "https://www.scrapingcourse.com/ecommerce/",
     depth=1,                         # link hops from the start URL
     max_items=50,                    # stop after keeping 50 URLs (default 10)
     max_pages=100,                   # stop after fetching 100 pages (default 10)
@@ -580,7 +580,8 @@ client.stop(crawl_id)                   # idempotent; read final counts with get
 Every non-2xx raises `CrawlAPIError`. Branch on `status_code` and `code`:
 
 ```python
-from zenrows.crawl import CRAWL_NOT_ENABLED_CODE, CrawlAPIError
+from zenrows import CrawlAPIError
+from zenrows.crawl import CRAWL_NOT_ENABLED_CODE
 
 try:
     client.create(start_url, depth=1)
