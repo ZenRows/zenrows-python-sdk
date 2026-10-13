@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "zenrows"
 version = "1.6.0"
-description = "ZenRows Python SDK — synchronous scraping + Batch (async job) API"
+description = "Zenrows Python SDK: Fetch, Extract (structured data), Batch and Crawl APIs"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
     { name = "ZenRows", email = "support@zenrows.com" },
 ]
-keywords = ["zenrows", "scraper", "scraping", "async", "batch"]
+keywords = ["zenrows", "scraper", "scraping", "web-scraping", "extract", "structured-data", "async", "batch", "crawl"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
