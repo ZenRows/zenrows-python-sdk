@@ -202,6 +202,8 @@ response = client.extract(url)  # extract: "auto"
 print(response.json())
 ```
 
+`extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
+
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)

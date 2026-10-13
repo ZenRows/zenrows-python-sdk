@@ -71,6 +71,29 @@ def _is_extract_domain_unavailable(response: requests.Response) -> bool:
     return (response.status_code, code.upper()) in _EXTRACT_DOMAIN_UNAVAILABLE
 
 
+# Adaptive Stealth Mode (wire `mode=auto`) picks js_render / premium_proxy
+# itself, so the API rejects it combined with either one set by hand.
+_ADAPTIVE_STEALTH_CONFLICTS = ("js_render", "premium_proxy")
+
+
+def _is_set(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return bool(value)
+
+
+def _with_adaptive_stealth(params: dict, enabled: bool) -> dict:
+    """Add wire `mode=auto` to `params` unless the caller already chose a
+    `mode`, or forces js_render / premium_proxy, which the API won't combine
+    with Adaptive Stealth Mode."""
+    if not enabled or "mode" in params:
+        return params
+    if any(_is_set(params.get(key)) for key in _ADAPTIVE_STEALTH_CONFLICTS):
+        return params
+    params["mode"] = "auto"
+    return params
+
+
 class ZenRowsClient:
     """Synchronous client for the Zenrows scraping API.
 
@@ -170,21 +193,20 @@ class ZenRowsClient:
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
         `mode` argument) on both the extract attempt and the Autoparse fallback,
         so a target needing `js_render`/`premium_proxy` gets escalated
-        automatically instead of failing with REQS002. Pass
-        `adaptive_stealth=False` to disable that and set `js_render`/
-        `premium_proxy` yourself.
+        automatically instead of failing with REQS002. It is skipped when
+        `params` sets `js_render` or `premium_proxy` (the API rejects either
+        combined with Adaptive Stealth Mode) or its own wire `mode`. Pass
+        `adaptive_stealth=False` to turn it off entirely.
         """
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
-        if adaptive_stealth:
-            final_params["mode"] = "auto"
+        _with_adaptive_stealth(final_params, adaptive_stealth)
         response = self.fetch(url, final_params, headers, **kwargs)
 
         if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
-            if adaptive_stealth:
-                autoparse_params["mode"] = "auto"
+            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
             return self.fetch(url, autoparse_params, headers, **kwargs)
 
         return response
@@ -245,15 +267,13 @@ class ZenRowsClient:
         `fallback_to_autoparse`, and `adaptive_stealth`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
-        if adaptive_stealth:
-            final_params["mode"] = "auto"
+        _with_adaptive_stealth(final_params, adaptive_stealth)
         response = await self.fetch_async(url, final_params, headers, **kwargs)
 
         if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
-            if adaptive_stealth:
-                autoparse_params["mode"] = "auto"
+            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
             return await self.fetch_async(url, autoparse_params, headers, **kwargs)
 
         return response

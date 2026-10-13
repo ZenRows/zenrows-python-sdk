@@ -107,7 +107,6 @@ class TestFetchExtractErrorHandling(TestCase):
                 "apikey": apikey,
                 "js_render": True,
                 "extract": "native",
-                "mode": "auto",
             },
         )
 
@@ -284,6 +283,60 @@ class TestExtractAdaptiveStealth(TestCase):
         _, fallback_kwargs = mock_request.call_args
         self.assertEqual(fallback_kwargs["params"]["mode"], "auto")
 
+    @mock.patch.object(Session, "request")
+    def test_skips_adaptive_stealth_when_js_render_is_set(self, mock_request):
+        """The API rejects mode=auto combined with js_render, so a caller's
+        fixed configuration is sent as is."""
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url, params={"js_render": True})
+
+        _, kwargs = mock_request.call_args
+        self.assertNotIn("mode", kwargs["params"])
+        self.assertTrue(kwargs["params"]["js_render"])
+
+    @mock.patch.object(Session, "request")
+    def test_skips_adaptive_stealth_when_premium_proxy_is_set(self, mock_request):
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url, params={"premium_proxy": "true"})
+
+        _, kwargs = mock_request.call_args
+        self.assertNotIn("mode", kwargs["params"])
+
+    @mock.patch.object(Session, "request")
+    def test_false_js_render_keeps_adaptive_stealth(self, mock_request):
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url, params={"js_render": "false", "premium_proxy": False})
+
+        _, kwargs = mock_request.call_args
+        self.assertEqual(kwargs["params"]["mode"], "auto")
+
+    @mock.patch.object(Session, "request")
+    def test_keeps_a_wire_mode_the_caller_set(self, mock_request):
+        mock_request.return_value = _fake_response(200)
+
+        self.client.extract(url, params={"mode": "custom"})
+
+        _, kwargs = mock_request.call_args
+        self.assertEqual(kwargs["params"]["mode"], "custom")
+
+    @mock.patch.object(Session, "request")
+    def test_fallback_request_skips_adaptive_stealth_with_premium_proxy(self, mock_request):
+        mock_request.side_effect = [
+            _fake_response(403, b'{"code": "REQS007"}'),
+            _fake_response(200, b"{}"),
+        ]
+
+        self.client.extract(url, params={"premium_proxy": True})
+
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        _, fallback_kwargs = mock_request.call_args
+        self.assertNotIn("mode", first_kwargs["params"])
+        self.assertNotIn("mode", fallback_kwargs["params"])
+        self.assertTrue(fallback_kwargs["params"]["autoparse"])
+
 
 class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):
     """Async counterpart - same REQS007 / AUTH010 -> Autoparse behavior."""
@@ -302,6 +355,20 @@ class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_request.call_count, 2)
+
+    @mock.patch.object(Session, "request")
+    async def test_skips_adaptive_stealth_when_js_render_is_set(self, mock_request):
+        mock_request.side_effect = [
+            _fake_response(403, b'{"code": "REQS007"}'),
+            _fake_response(200, b"{}"),
+        ]
+
+        await self.client.extract_async(url, params={"js_render": True})
+
+        first_kwargs = mock_request.call_args_list[0].kwargs
+        _, fallback_kwargs = mock_request.call_args
+        self.assertNotIn("mode", first_kwargs["params"])
+        self.assertNotIn("mode", fallback_kwargs["params"])
 
     @mock.patch.object(Session, "request")
     async def test_falls_back_to_autoparse_on_reqs007(self, mock_request):
