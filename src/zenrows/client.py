@@ -216,8 +216,8 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        REQS007 / AUTH010 -> Autoparse fallback behavior, `fallback_to_autoparse`, and
-        `adaptive_stealth`."""
+        REQS007 / AUTH010 -> Autoparse fallback behavior,
+        `fallback_to_autoparse`, and `adaptive_stealth`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         if adaptive_stealth:
