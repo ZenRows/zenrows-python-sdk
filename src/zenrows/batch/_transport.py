@@ -4,10 +4,19 @@ Owns the httpx Client, the `X-API-Key` auth header, default
 User-Agent, automatic retries for transient failures, and the RFC
 7807 → `BatchAPIError` mapping. The facade (`client.py`) is thin glue
 over this — one method per endpoint, all typed via pydantic v2 models.
+
+The Crawl client (`zenrows.crawl`) reuses it with its own error type
+and logger: both APIs share the key header, problem+json errors and
+retry policy.
 """
 
+import json
+import logging
+import math
 import random
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 import httpx
@@ -32,6 +41,9 @@ _IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE", "HEAD", "OPTIONS"})
 # capped at 10s.
 _BACKOFF_BASE_MS = 250
 _BACKOFF_CAP_MS = 10_000
+# A `Retry-After` above this waits only this long, so a large server value
+# cannot hang a call.
+_RETRY_AFTER_CAP_MS = 30_000
 _DEFAULT_RETRIES = 3
 
 
@@ -46,7 +58,8 @@ def _backoff_ms(attempt: int) -> float:
 
 
 def _retry_after_ms(response: httpx.Response) -> float | None:
-    """Parse a `Retry-After` header (delta-seconds only) to milliseconds."""
+    """Parse a `Retry-After` header (delta-seconds only) to milliseconds,
+    at most `_RETRY_AFTER_CAP_MS`."""
     raw = response.headers.get("Retry-After")
     if not raw:
         return None
@@ -54,7 +67,9 @@ def _retry_after_ms(response: httpx.Response) -> float | None:
         secs = float(raw)
     except ValueError:
         return None
-    return secs * 1000 if secs >= 0 else None
+    if not math.isfinite(secs) or secs < 0:
+        return None
+    return min(secs * 1000, _RETRY_AFTER_CAP_MS)
 
 
 class _Transport:
@@ -78,8 +93,15 @@ class _Transport:
         retries: int = _DEFAULT_RETRIES,
         verify: bool | str = True,
         httpx_args: dict[str, Any] | None = None,
+        error_from_response: Callable[[httpx.Response], Exception] = BatchAPIError.from_response,
+        log: logging.Logger = _log,
     ):
+        """`error_from_response` turns a non-2xx response into the
+        exception to raise; it should expose `.code` and `.detail` for
+        the error log. `log` receives the per-request records."""
         self._retries = max(0, retries)
+        self._error_from_response = error_from_response
+        self._log = log
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers={
@@ -102,17 +124,18 @@ class _Transport:
         params: dict[str, Any] | None,
         headers: dict[str, str] | None,
         content: bytes | None = None,
+        retry_statuses: frozenset[int] = _RETRYABLE_STATUSES,
     ) -> httpx.Response:
         """Issue the request, retrying transient failures on idempotent
         requests.
 
-        Retries `{429, 502, 503, 504}` and transient network errors up
-        to `retries` times, with jittered exponential backoff (honoring
-        `Retry-After` when present). Only idempotent requests are
-        replayed — `GET`/`PUT`/`DELETE`/`HEAD`/`OPTIONS`, plus `POST`
-        when the caller supplied an `Idempotency-Key`. Our own timeouts
-        (`httpx.TimeoutException`) are never retried: the caller set
-        that budget.
+        Retries `retry_statuses` (default `{429, 502, 503, 504}`) and
+        transient network errors up to `retries` times, with jittered
+        exponential backoff (honoring `Retry-After` up to 30s). Only
+        idempotent requests are replayed — `GET`/`PUT`/`DELETE`/`HEAD`/
+        `OPTIONS`, plus `POST` when the caller supplied an
+        `Idempotency-Key`. Our own timeouts (`httpx.TimeoutException`)
+        are never retried: the caller set that budget.
         """
         idempotent = method.upper() in _IDEMPOTENT_METHODS or (
             method.upper() == "POST" and _has_idempotency_key(headers)
@@ -134,11 +157,7 @@ class _Transport:
                     continue
                 raise
 
-            if (
-                idempotent
-                and attempt < self._retries
-                and response.status_code in _RETRYABLE_STATUSES
-            ):
+            if idempotent and attempt < self._retries and response.status_code in retry_statuses:
                 wait_ms = _retry_after_ms(response) or _backoff_ms(attempt)
                 response.close()
                 time.sleep(wait_ms / 1000)
@@ -185,11 +204,26 @@ class _Transport:
             payload = body.model_dump(
                 mode="json", exclude_unset=True, exclude_none=True, by_alias=True
             )
-            import json
-
             content = json.dumps(payload).encode("utf-8")
             headers = {**(headers or {}), "Content-Type": "application/json"}
 
+        response = self.request(method, path, params=params, headers=headers, content=content)
+        if response.status_code == 204 or not response.content:
+            return None
+        return response.json()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        content: bytes | None = None,
+        retry_statuses: frozenset[int] = _RETRYABLE_STATUSES,
+    ) -> httpx.Response:
+        """Send a request (with retries) and return the raw response,
+        raising the mapped error on non-2xx. For non-JSON bodies."""
         start = time.monotonic()
         response = self._send(
             method,
@@ -197,27 +231,44 @@ class _Transport:
             params=_drop_none(params),
             headers=headers,
             content=content,
+            retry_statuses=retry_statuses,
         )
         elapsed_ms = (time.monotonic() - start) * 1000
-
-        if response.status_code >= 400:
-            err = BatchAPIError.from_response(response)
-            log_error(
-                _log,
-                method=method,
-                path=path,
-                status=response.status_code,
-                code=err.code,
-                detail=err.problem.detail if err.problem else None,
-            )
-            raise err
-
+        self._raise_for_status(method, path, response)
         log_request(
-            _log, method=method, path=path, status=response.status_code, elapsed_ms=elapsed_ms
+            self._log, method=method, path=path, status=response.status_code, elapsed_ms=elapsed_ms
         )
-        if response.status_code == 204 or not response.content:
-            return None
-        return response.json()
+        return response
+
+    @contextmanager
+    def stream(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Iterator[httpx.Response]:
+        """Open a streamed response, raising the mapped error on
+        non-2xx. Not retried: a stream may be partly consumed."""
+        with self._client.stream(method, path, params=_drop_none(params)) as response:
+            if response.status_code >= 400:
+                response.read()
+            self._raise_for_status(method, path, response)
+            yield response
+
+    def _raise_for_status(self, method: str, path: str, response: httpx.Response) -> None:
+        if response.status_code < 400:
+            return
+        err = self._error_from_response(response)
+        log_error(
+            self._log,
+            method=method,
+            path=path,
+            status=response.status_code,
+            code=getattr(err, "code", "internal"),
+            detail=getattr(err, "detail", None),
+        )
+        raise err
 
 
 def _drop_none(d: dict[str, Any] | None) -> dict[str, Any] | None:
