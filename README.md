@@ -17,7 +17,7 @@ This package ships three clients:
   - **`ZenRowsBatchClient`** — the async-job / Batch API client. Submit
     thousands of URLs as one job, poll for results, optionally upload a
     CSV of URLs in one call. Best for offline / bulk pipelines.
-    _(Private beta — [contact support](mailto:support@zenrows.com) for access.)_
+    Available to every Zenrows account with the same API key.
   - **`ZenRowsCrawlClient`** — the Crawl API client. Give it one start
     URL; it follows links and returns the URLs (and, optionally, the
     pages) it finds behind it. _(New.)_
@@ -205,9 +205,9 @@ print(response.json())
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
 
-> **⚠️ Beta.** The Batch API is currently in beta and not yet generally
-> available — free to use while it's in beta, but the shape of the API may
-> still change before GA.
+> Batch is available to every Zenrows account: your existing API key works
+> with no extra setup, and only successful requests cost credits. See the
+> [Batch docs](https://docs.zenrows.com/batch/introduction).
 
 For workflows where you have many URLs to scrape and don't want to
 manage retries, concurrency, and pagination yourself, the Batch API

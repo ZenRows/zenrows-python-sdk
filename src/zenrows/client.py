@@ -32,15 +32,23 @@ DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 _RETRY_STATUSES = [422, 429, 500, 502, 503, 504]
 
 
-def _is_auth010(response: requests.Response) -> bool:
-    """True when a response's JSON error envelope carries the Extract
-    domain-not-enabled code (AUTH010)."""
+# Extract answers these when it can't serve the target domain: 403 REQS007
+# (domain not prepared yet) or the legacy 402 AUTH010 (domain not enabled).
+# extract(mode="auto") retries both once with Autoparse.
+_EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
+
+
+def _is_extract_domain_unavailable(response: requests.Response) -> bool:
+    """True when the response is Extract saying it can't serve the target
+    domain yet (403 REQS007, or the legacy 402 AUTH010)."""
     try:
         body = response.json()
     except ValueError:
         return False
     code = body.get("code") if isinstance(body, dict) else None
-    return isinstance(code, str) and code.upper() == "AUTH010"
+    if not isinstance(code, str):
+        return False
+    return (response.status_code, code.upper()) in _EXTRACT_DOMAIN_UNAVAILABLE
 
 
 class ZenRowsClient:
@@ -125,11 +133,13 @@ class ZenRowsClient:
         or "standard". Thin wrapper over `fetch()` with the `extract` param set —
         no separate endpoint or auth.
 
-        `mode="auto"` is a domain-gated open beta: when the target domain isn't
-        enabled yet, the API returns a 402 with `code: "AUTH010"`. By default
-        this retries once with `autoparse=True` instead of returning the error
-        response — pass `fallback_to_autoparse=False` to disable that and get
-        the raw AUTH010 response back.
+        Extract works on any domain once Zenrows has prepared it, with any
+        active API key. A domain that isn't prepared yet answers 403 with
+        `code: "REQS007"` (prepare it with `POST /v1/extract/prepared-domains`);
+        the legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
+        On either, `mode="auto"` retries once with `autoparse=True` instead of
+        returning the error response — pass `fallback_to_autoparse=False` to
+        disable that and get the raw error response back.
 
         `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
@@ -145,12 +155,7 @@ class ZenRowsClient:
             final_params["mode"] = "auto"
         response = self.fetch(url, final_params, headers, **kwargs)
 
-        if (
-            response.status_code == 402
-            and mode == "auto"
-            and fallback_to_autoparse
-            and _is_auth010(response)
-        ):
+        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
             if adaptive_stealth:
@@ -211,7 +216,7 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        AUTH010 -> Autoparse fallback behavior, `fallback_to_autoparse`, and
+        REQS007 / AUTH010 -> Autoparse fallback behavior, `fallback_to_autoparse`, and
         `adaptive_stealth`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
@@ -219,12 +224,7 @@ class ZenRowsClient:
             final_params["mode"] = "auto"
         response = await self.fetch_async(url, final_params, headers, **kwargs)
 
-        if (
-            response.status_code == 402
-            and mode == "auto"
-            and fallback_to_autoparse
-            and _is_auth010(response)
-        ):
+        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
             autoparse_params = dict(params) if params else {}
             autoparse_params["autoparse"] = True
             if adaptive_stealth:
