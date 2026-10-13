@@ -120,9 +120,9 @@ class ZenRowsClient:
         adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
-        """Fetch a URL and run it through Extract — Zenrows' AI-powered structured
+        """Fetch a URL and run it through Extract, Zenrows' AI-powered structured
         extraction. `mode` is one of "auto" (default), "native",
-        or "standard". Thin wrapper over `fetch()` with the `extract` param set —
+        or "standard". Thin wrapper over `fetch()` with the `extract` param set:
         no separate endpoint or auth.
 
         Extract works on any domain once Zenrows has prepared it, with any
@@ -130,7 +130,7 @@ class ZenRowsClient:
         `code: "REQS007"`, returned as is; prepare it with
         `POST /v1/extract/prepared-domains`. If the API answers with
         `code: "AUTH010"` (domain not enabled), this retries once with
-        `autoparse=True` instead of returning the error response — pass
+        `autoparse=True` instead of returning the error response. Pass
         `fallback_to_autoparse=False` to disable that and get the raw AUTH010
         response back.
 
