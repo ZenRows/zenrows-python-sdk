@@ -301,11 +301,50 @@ def test_stop_surfaces_crawl_busy_after_retries(no_sleep):
     assert no_sleep == [1.0, 1.0]
 
 
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(429, "rate_limited"), (502, "bad_gateway"), (503, "service_unavailable"), (504, None)],
+)
 @respx.mock
-def test_stop_does_not_retry_other_503(no_sleep):
+def test_stop_retries_transient_status(no_sleep, status: int, code: str | None):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    first = (
+        problem(status, code, headers={"Retry-After": "2"})
+        if code
+        else Response(status, headers={"Retry-After": "2"})
+    )
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        side_effect=[
+            first,
+            Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
+        ]
+    )
+
+    stopped = client.stop("c_1")
+
+    assert stopped.status is CrawlStatus.STOPPED
+    assert route.call_count == 2
+    assert no_sleep == [2.0]
+
+
+@respx.mock
+def test_stop_surfaces_502_after_retries(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=3)
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(return_value=problem(502, "bad_gateway"))
+
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.stop("c_1")
+
+    assert exc_info.value.status_code == 502
+    assert route.call_count == 4
+    assert no_sleep == [1.0, 1.0, 1.0]
+
+
+@respx.mock
+def test_stop_does_not_retry_other_status(no_sleep):
     client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
     route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
-        return_value=problem(503, "service_unavailable", headers={"Retry-After": "1"})
+        return_value=problem(500, "internal_error")
     )
 
     with pytest.raises(CrawlAPIError):
@@ -597,12 +636,15 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
 @pytest.mark.parametrize(
     ("retry_after", "slept"), [("3600", 30.0), ("-1", 1.0), ("nan", 1.0), ("2", 2.0)]
 )
+@pytest.mark.parametrize(("status", "code"), [(503, "crawl_busy"), (429, "rate_limited")])
 @respx.mock
-def test_stop_waits_at_most_30_seconds_for_crawl_busy(no_sleep, retry_after: str, slept: float):
+def test_stop_waits_at_most_30_seconds(
+    no_sleep, status: int, code: str, retry_after: str, slept: float
+):
     client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=1)
     respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
         side_effect=[
-            problem(503, "crawl_busy", headers={"Retry-After": retry_after}),
+            problem(status, code, headers={"Retry-After": retry_after}),
             Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
         ]
     )

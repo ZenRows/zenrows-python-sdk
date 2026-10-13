@@ -49,11 +49,13 @@ _log = logging.getLogger("zenrows.crawl.transport")
 # 429 `too_many_crawls` is a capacity limit, not a transient failure.
 _CREATE_RETRY_STATUSES = _RETRYABLE_STATUSES - {429}
 
-# 503 `crawl_busy` on stop: nothing was saved and the crawl is still
-# running, so the stop is safe to repeat after `Retry-After`.
-_CRAWL_BUSY = "crawl_busy"
-# The longest a crawl_busy `Retry-After` may make a stop wait, so a large
-# server value cannot hang it.
+# A stop is safe to repeat (an ended crawl answers as it ended), so
+# `stop` retries these statuses itself even though it is a POST without
+# an idempotency key. 503 includes `crawl_busy`: nothing was saved and
+# the crawl is still running.
+_STOP_RETRY_STATUSES = _RETRYABLE_STATUSES
+# The longest a `Retry-After` may make a stop wait, so a large server
+# value cannot hang it.
 _MAX_STOP_RETRY_AFTER = 30.0
 
 _POLL_INTERVAL = 2.0
@@ -127,7 +129,7 @@ class ZenRowsCrawlClient:
         `create` that carries an `idempotency_key` (never on 429 for
         `create`). Retries use jittered exponential backoff and honor
         `Retry-After`; set `retries=0` to disable. It also bounds the
-        retries of a `stop` answered 503 `crawl_busy`."""
+        retries of a `stop` answered 429, 502, 503 or 504."""
         if not api_key:
             raise ValueError("ZenRowsCrawlClient: api_key is required.")
         self._retries = max(0, retries)
@@ -276,9 +278,12 @@ class ZenRowsCrawlClient:
         The answer carries no counts; read the final coverage and
         results with `get` once pages already in flight have finished.
 
-        A 503 `crawl_busy` means the stop was not saved and the crawl is
-        still running; `stop` retries it up to `retries` times, waiting
-        `Retry-After` seconds (at most 30) each time, then raises it.
+        Because repeating a stop is safe, `stop` retries a 429, 502,
+        503 (including `crawl_busy`, which means the stop was not saved
+        and the crawl is still running) or 504 up to `retries` times,
+        waiting `Retry-After` seconds (at most 30; 1 when missing or
+        unusable) each time, then raises the last error. Network errors
+        are not retried.
         """
         attempt = 0
         while True:
@@ -287,7 +292,7 @@ class ZenRowsCrawlClient:
                     self._t.request_json("POST", f"/crawls/{crawl_id}/stop")
                 )
             except CrawlAPIError as err:
-                if err.status_code != 503 or err.code != _CRAWL_BUSY or attempt >= self._retries:
+                if err.status_code not in _STOP_RETRY_STATUSES or attempt >= self._retries:
                     raise
                 time.sleep(_stop_retry_wait(err.retry_after))
                 attempt += 1
@@ -351,7 +356,7 @@ class ZenRowsCrawlClient:
 
 
 def _stop_retry_wait(retry_after: float | None) -> float:
-    """Seconds `stop` waits after a 503 crawl_busy: the server's
+    """Seconds `stop` waits after a 429/502/503/504: the server's
     `Retry-After`, 1s when it is missing or unusable, at most 30s."""
     if retry_after is None or not math.isfinite(retry_after) or retry_after < 0:
         return 1.0
