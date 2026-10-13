@@ -496,9 +496,11 @@ See `src/zenrows/batch/client.py` or `help(ZenRowsBatchClient)`.
 
 Crawl is still evolving: new features are coming, limits may be tuned, and the changelog announces each change.
 
-A crawl starts from one URL, follows the links on each page up to
-`depth` hops, and keeps the URLs that match your patterns, up to
-`max_items`. It stays on the start URL's registrable domain;
+A crawl starts from one URL, follows the links on each page, and keeps
+the URLs that match your patterns, up to `max_items`. It stops at
+`max_items` or `max_pages`, or when no link is left. `depth` limits the
+link hops from the start URL; without it the crawl has no depth limit.
+It stays on the start URL's registrable domain;
 subdomains count. It runs in the background: `create` returns at once with
 `status="running"`, and `wait` blocks until it ends. Without
 `output_format` a crawl returns URLs only; `output_format="html"` also
@@ -512,9 +514,9 @@ client = ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])
 
 crawl = client.create(
     "https://www.scrapingcourse.com/ecommerce/",
-    depth=1,                         # link hops from the start URL
-    max_items=50,                    # stop after keeping 50 URLs (default 10)
-    max_pages=100,                   # stop after fetching 100 pages (default 10)
+    depth=1,                         # link hops from the start URL (default: no limit)
+    max_items=50,                    # stop after keeping 50 URLs (default 100)
+    max_pages=100,                   # stop after fetching 100 pages (default 100)
     include_patterns=["/product/"],  # keep only URLs containing this
 )
 crawl = client.wait(crawl.crawl_id)            # polls up to timeout=600 s

@@ -29,18 +29,20 @@ BASE_URL = "http://localhost:9100/v1"
 API_KEY = "test-key"
 
 
-def crawl_body(**overrides):
+def crawl_body(*, omit: tuple[str, ...] = (), **overrides):
     body = {
         "crawl_id": "c_1",
         "status": "running",
         "url": "https://example.com/",
         "depth": 1,
-        "max_items": 10,
-        "max_pages": 10,
+        "max_items": 100,
+        "max_pages": 100,
         "coverage": {"pages_fetched": 0, "pages_failed": 0, "items_found": 0},
         "created_at": "2026-10-08T09:00:00Z",
     }
     body.update(overrides)
+    for key in omit:
+        del body[key]
     return body
 
 
@@ -93,18 +95,34 @@ def test_base_url_is_a_constructor_option_only(monkeypatch):
 @respx.mock
 def test_create_sends_only_required_fields(client: ZenRowsCrawlClient):
     route = respx.post(f"{BASE_URL}/crawls").mock(
-        return_value=Response(202, headers={"Location": "/v1/crawls/c_1"}, json=crawl_body())
+        return_value=Response(
+            202, headers={"Location": "/v1/crawls/c_1"}, json=crawl_body(omit=("depth",))
+        )
     )
 
-    crawl = client.create("https://example.com/", depth=1)
+    crawl = client.create("https://example.com/")
 
     assert crawl.crawl_id == "c_1"
     assert crawl.status is CrawlStatus.RUNNING
+    assert crawl.depth is None  # created without depth: no depth limit, none echoed
     sent = route.calls.last.request
     assert sent.headers["X-API-Key"] == API_KEY
     assert sent.headers["Content-Type"] == "application/json"
     assert "Idempotency-Key" not in sent.headers
-    assert json.loads(sent.content) == {"url": "https://example.com/", "depth": 1}
+    assert json.loads(sent.content) == {"url": "https://example.com/"}
+
+
+@respx.mock
+def test_create_sends_depth_when_given(client: ZenRowsCrawlClient):
+    route = respx.post(f"{BASE_URL}/crawls").mock(return_value=Response(202, json=crawl_body()))
+
+    crawl = client.create("https://example.com/", depth=1)
+
+    assert crawl.depth == 1
+    assert json.loads(route.calls.last.request.content) == {
+        "url": "https://example.com/",
+        "depth": 1,
+    }
 
 
 @respx.mock
@@ -213,7 +231,7 @@ def test_list_returns_one_page(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls").mock(
         side_effect=[
             Response(200, json={"crawls": [crawl_body(crawl_id="c_2")], "next_cursor": "n1"}),
-            Response(200, json={"crawls": [crawl_body(crawl_id="c_1")]}),
+            Response(200, json={"crawls": [crawl_body(crawl_id="c_1", omit=("depth",))]}),
         ]
     )
 
@@ -222,6 +240,8 @@ def test_list_returns_one_page(client: ZenRowsCrawlClient):
 
     assert [c.crawl_id for c in first.crawls] == ["c_2"]
     assert [c.crawl_id for c in last.crawls] == ["c_1"]
+    assert first.crawls[0].depth == 1
+    assert last.crawls[0].depth is None  # created without depth
     assert last.next_cursor is None
     assert dict(route.calls[0].request.url.params) == {"limit": "1"}
     assert route.calls[1].request.url.params["cursor"] == "n1"
@@ -281,11 +301,50 @@ def test_stop_surfaces_crawl_busy_after_retries(no_sleep):
     assert no_sleep == [1.0, 1.0]
 
 
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(429, "rate_limited"), (502, "bad_gateway"), (503, "service_unavailable"), (504, None)],
+)
 @respx.mock
-def test_stop_does_not_retry_other_503(no_sleep):
+def test_stop_retries_transient_status(no_sleep, status: int, code: str | None):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
+    first = (
+        problem(status, code, headers={"Retry-After": "2"})
+        if code
+        else Response(status, headers={"Retry-After": "2"})
+    )
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
+        side_effect=[
+            first,
+            Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
+        ]
+    )
+
+    stopped = client.stop("c_1")
+
+    assert stopped.status is CrawlStatus.STOPPED
+    assert route.call_count == 2
+    assert no_sleep == [2.0]
+
+
+@respx.mock
+def test_stop_surfaces_502_after_retries(no_sleep):
+    client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=3)
+    route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(return_value=problem(502, "bad_gateway"))
+
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.stop("c_1")
+
+    assert exc_info.value.status_code == 502
+    assert route.call_count == 4
+    assert no_sleep == [1.0, 1.0, 1.0]
+
+
+@respx.mock
+def test_stop_does_not_retry_other_status(no_sleep):
     client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=2)
     route = respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
-        return_value=problem(503, "service_unavailable", headers={"Retry-After": "1"})
+        return_value=problem(500, "internal_error")
     )
 
     with pytest.raises(CrawlAPIError):
@@ -577,12 +636,15 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
 @pytest.mark.parametrize(
     ("retry_after", "slept"), [("3600", 30.0), ("-1", 1.0), ("nan", 1.0), ("2", 2.0)]
 )
+@pytest.mark.parametrize(("status", "code"), [(503, "crawl_busy"), (429, "rate_limited")])
 @respx.mock
-def test_stop_waits_at_most_30_seconds_for_crawl_busy(no_sleep, retry_after: str, slept: float):
+def test_stop_waits_at_most_30_seconds(
+    no_sleep, status: int, code: str, retry_after: str, slept: float
+):
     client = ZenRowsCrawlClient(api_key=API_KEY, base_url=BASE_URL, retries=1)
     respx.post(f"{BASE_URL}/crawls/c_1/stop").mock(
         side_effect=[
-            problem(503, "crawl_busy", headers={"Retry-After": retry_after}),
+            problem(status, code, headers={"Retry-After": retry_after}),
             Response(200, json={"crawl_id": "c_1", "status": "stopped", "stop_reason": "user"}),
         ]
     )
