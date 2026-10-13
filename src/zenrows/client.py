@@ -13,6 +13,7 @@ For the async (job-based) Batch API, see `zenrows.ZenRowsBatchClient`.
 
 import asyncio
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
@@ -27,9 +28,32 @@ from zenrows.__version__ import __version__
 DEFAULT_SCRAPER_URL = "https://api.zenrows.com/v1/"
 DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 
-# Status codes the retry layer treats as transient. The set was inherited
-# from the original SDK and matches the gateway's documented retry guidance.
-_RETRY_STATUSES = [422, 429, 500, 502, 503, 504]
+# Status codes the urllib3 retry layer treats as transient. 422 is retried
+# too, but in `_worker`, because whether it is worth retrying depends on the
+# response body (see `is_no_data_extracted`).
+_RETRY_STATUSES = [429, 500, 502, 503, 504]
+_RETRY_BACKOFF_FACTOR = 0.5
+
+# Extract's answer when it knows the kind of page but none of the fields came
+# back filled. Retrying returns the same answer, so it is never retried.
+_NO_DATA_EXTRACTED = "no_data_extracted"
+
+
+def _error_code(response: requests.Response) -> str | None:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    code = body.get("code") if isinstance(body, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def is_no_data_extracted(response: requests.Response) -> bool:
+    """True when the response is Extract's 422 `no_data_extracted`: Extract
+    knows this kind of page but found no data on it. The request is not
+    charged, and the client does not retry it."""
+    code = _error_code(response)
+    return response.status_code == 422 and code is not None and code.lower() == _NO_DATA_EXTRACTED
 
 
 # Extract answers these when it can't serve the target domain: 403 REQS007
@@ -41,12 +65,8 @@ _EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
 def _is_extract_domain_unavailable(response: requests.Response) -> bool:
     """True when the response is Extract saying it can't serve the target
     domain yet (403 REQS007, or the legacy 402 AUTH010)."""
-    try:
-        body = response.json()
-    except ValueError:
-        return False
-    code = body.get("code") if isinstance(body, dict) else None
-    if not isinstance(code, str):
+    code = _error_code(response)
+    if code is None:
         return False
     return (response.status_code, code.upper()) in _EXTRACT_DOMAIN_UNAVAILABLE
 
@@ -81,12 +101,13 @@ class ZenRowsClient:
         self.apikey = apikey
         self.api_url = base_url or os.environ.get("ZENROWS_SCRAPER_BASE_URL") or DEFAULT_SCRAPER_URL
 
+        self.retries = retries
         self.executor = ThreadPoolExecutor(max_workers=concurrency)
         self.requests_session = requests.Session()
         if retries > 0:
             max_retries = Retry(
                 total=retries,
-                backoff_factor=0.5,
+                backoff_factor=_RETRY_BACKOFF_FACTOR,
                 status_forcelist=_RETRY_STATUSES,
                 raise_on_status=False,
             )
@@ -140,6 +161,10 @@ class ZenRowsClient:
         On either, `mode="auto"` retries once with `autoparse=True` instead of
         returning the error response. Pass `fallback_to_autoparse=False` to
         disable that and get the raw error response back.
+
+        A 422 with `code: "no_data_extracted"` means Extract knows this kind
+        of page but found no data on it. It is not charged and is never
+        retried; check it with `is_no_data_extracted(response)`.
 
         `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
@@ -309,7 +334,7 @@ class ZenRowsClient:
             final_headers["Connection"] = None
             final_headers.update(headers)
 
-        return self.requests_session.request(
+        response = self.requests_session.request(
             method,
             self.api_url,
             params=final_params,
@@ -317,3 +342,25 @@ class ZenRowsClient:
             data=data,
             **kwargs,
         )
+        # Retry a 422 here rather than in urllib3, which can't read the body:
+        # Extract's `no_data_extracted` is a final answer, any other 422 is a
+        # failure to get the target's content and is worth another try.
+        attempt = 0
+        while (
+            response.status_code == 422
+            and attempt < self.retries
+            and not is_no_data_extracted(response)
+        ):
+            attempt += 1
+            # Same schedule as urllib3's Retry: no wait before the first retry.
+            if attempt > 1:
+                time.sleep(_RETRY_BACKOFF_FACTOR * 2 ** (attempt - 1))
+            response = self.requests_session.request(
+                method,
+                self.api_url,
+                params=final_params,
+                headers=final_headers,
+                data=data,
+                **kwargs,
+            )
+        return response

@@ -57,7 +57,7 @@ Start using the API by [creating your API Key](https://www.zenrows.com/register?
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
-It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 429, 500, 502, 503, and 504). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
+It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 422, 429, 500, 502, 503, and 504, except Extract's `422 no_data_extracted`). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
 
 `client.fetch()` is the primary method for the main page-scraping product; `client.get()` still works and is kept as a deprecated alias.
 
@@ -201,6 +201,8 @@ response = client.extract(url)  # extract: "auto"
 
 print(response.json())
 ```
+
+A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
 
