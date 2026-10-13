@@ -189,7 +189,7 @@ asyncio.run(main())
 
 ### Extract
 
-[Extract](https://docs.zenrows.com/extract/introduction) (beta) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
+[Extract](https://docs.zenrows.com/extract/introduction) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()` — it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
 
 ```python
 from zenrows import ZenRowsClient
