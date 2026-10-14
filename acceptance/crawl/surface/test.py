@@ -248,7 +248,8 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StandIn)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 from zenrows import ZenRowsCrawlClient  # noqa: E402  (imported once installed, as a user would)
-from zenrows.crawl import CrawlAPIError  # noqa: E402
+from zenrows.batch._open_enum import is_unknown  # noqa: E402
+from zenrows.crawl import CrawlAPIError, CrawlErrorCode  # noqa: E402
 
 cap = ZenRowsCrawlClient(
     "capture-key", base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", retries=0
@@ -839,6 +840,72 @@ run_check(
     live=True,
 )
 
+
+def c22():
+    """discovery: sent as given, echoed back, and ["links"] when left out."""
+    given = create(discovery=["links"], **BASE)
+    left_out = create(**{**BASE, "max_items": 1})
+    for c in (given, left_out):
+        client.stop(c.crawl_id)
+    values = [[d.value for d in c.discovery] for c in (given, left_out)]
+    return (
+        pass_if(values == [["links"], ["links"]]),
+        json.dumps({"discovery=['links']": values[0], "left out": values[1]}),
+        "",
+    )
+
+
+def c23():
+    """content(download=True): the same page, asked for as a file to save."""
+    b = state.get("B")
+    if not b:
+        return SKIP, "no html crawl to read a page from", ""
+    fetched = next(
+        (r for r in client.get(b.crawl_id, limit=100).results if r.content_url),
+        None,
+    )
+    if not fetched:
+        return SKIP, "no result had been fetched", ""
+    plain = client.content(b.crawl_id, fetched)
+    as_file = client.content(b.crawl_id, fetched, download=True)
+    return (
+        pass_if(plain == as_file and bool(plain)),
+        f"same {len(plain)} chars with and without download=True",
+        trim(plain, 400),
+    )
+
+
+def c24():
+    """api_key_cap_reached parses as the named member, not as UNKNOWN."""
+    code = CrawlErrorCode("api_key_cap_reached")
+    return (
+        pass_if(code is CrawlErrorCode.API_KEY_CAP_REACHED and not is_unknown(code)),
+        f"{code!r} (name {code.name})",
+        "",
+    )
+
+
+run_check(
+    "22",
+    "Discovery",
+    'create(discovery=["links"]) is echoed back, and a create without it reads ["links"]',
+    c22,
+    live=True,
+)
+run_check(
+    "23",
+    "Content as a file",
+    "content(download=True) returns the same page as content() does",
+    c23,
+    live=True,
+)
+run_check(
+    "24",
+    "Run error codes",
+    "api_key_cap_reached is a named CrawlErrorCode member, not an unknown value",
+    c24,
+)
+
 with open(f"{RESULTS}/naming.json", "w") as f:
     json.dump(
         {
@@ -856,11 +923,13 @@ with open(f"{RESULTS}/naming.json", "w") as f:
                     "include_patterns",
                     "exclude_patterns",
                     "output_format",
+                    "discovery",
                     "idempotency_key",
                     "cursor",
                     "limit",
                     "timeout",
                     "content_id",
+                    "download",
                 ]
             },
         },

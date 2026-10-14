@@ -172,6 +172,7 @@ class ZenRowsCrawlClient:
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
         output_format: Literal["html", "markdown"] | None = None,
+        discovery: list[Literal["links"]] | None = None,
         idempotency_key: str | None = None,
     ) -> Crawl:
         """`POST /crawls` — start a crawl and return it, `running`.
@@ -190,6 +191,9 @@ class ZenRowsCrawlClient:
         - `output_format="html"` or `"markdown"`: also fetch every kept
           URL's page, as HTML or as Markdown, readable with `content` /
           `download`. Omit for URLs only.
+        - `discovery`: how the crawl finds the URLs it follows on each
+          page it walks. `["links"]` follows the links in the page's
+          HTML, and is what a crawl runs with when you leave it out.
         - `idempotency_key`: a retry with the same key and body answers
           with the crawl the first request created.
 
@@ -206,6 +210,7 @@ class ZenRowsCrawlClient:
             "include_patterns": include_patterns,
             "exclude_patterns": exclude_patterns,
             "output_format": output_format,
+            "discovery": discovery,
         }
         body.update({k: v for k, v in optional.items() if v is not None})
         headers = {"Content-Type": "application/json"}
@@ -300,7 +305,13 @@ class ZenRowsCrawlClient:
 
     # ===== contents =====
 
-    def content(self, crawl_id: str, content_id: str | CrawlResult) -> str:
+    def content(
+        self,
+        crawl_id: str,
+        content_id: str | CrawlResult,
+        *,
+        download: bool = False,
+    ) -> str:
         """`GET /crawls/{crawl_id}/contents/{content_id}` — one kept
         URL's page, as text in the crawl's `output_format` (HTML or
         Markdown).
@@ -310,6 +321,10 @@ class ZenRowsCrawlClient:
         segment of the `content_url`). Only crawls created with an
         `output_format` have contents; anything else is 404
         `content_not_found`.
+
+        `download=True` asks for the page as a file to save: the server
+        sends `Content-Disposition: attachment` with a file name built
+        from the content id. The text returned is the same either way.
         """
         if isinstance(content_id, CrawlResult):
             if not content_id.content_url:
@@ -319,7 +334,8 @@ class ZenRowsCrawlClient:
                 )
             content_id = content_id.content_url
         segment = content_id.rstrip("/").rsplit("/", 1)[-1]
-        return self._t.request("GET", f"/crawls/{crawl_id}/contents/{segment}").text
+        params = {"download": "true"} if download else None
+        return self._t.request("GET", f"/crawls/{crawl_id}/contents/{segment}", params=params).text
 
     def download(self, crawl_id: str) -> CrawlDownload:
         """`GET /crawls/{crawl_id}/download` — open the NDJSON file and
