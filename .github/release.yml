@@ -1,12 +1,7 @@
+# GitHub's generated notes: "What's Changed", one line per PR. The release PR
+# itself is left out.
 changelog:
   exclude:
     labels:
       - "autorelease: pending"
       - "autorelease: tagged"
-  categories:
-    - title: Features
-      labels: [enhancement]
-    - title: Fixes
-      labels: [bug]
-    - title: Other changes
-      labels: ["*"]

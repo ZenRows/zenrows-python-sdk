@@ -108,7 +108,6 @@ jobs:
       pull-requests: write
       id-token: write
     env:
-      GH_TOKEN: ${{ github.token }}
       VERSION: ${{ needs.detect.outputs.version }}
       TAG: ${{ needs.detect.outputs.tag }}
       PREVIOUS_TAG: ${{ needs.detect.outputs.previous_tag }}
@@ -134,13 +133,25 @@ jobs:
           git diff --exit-code -I '^#   timestamp:' -- src/zenrows/batch/models.py
           make test
 
-      - name: Stop if the tag already exists
+      # A re-run after a partial release finds its own tag and goes on to publish.
+      - name: Check the tag
+        id: tag
         if: env.IS_PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
-            echo "::error::The tag $TAG already exists."
+          set -euo pipefail
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" 2>/dev/null) || exit 0
+          sha=$(jq -r .object.sha <<<"$ref")
+          if [ "$(jq -r .object.type <<<"$ref")" = tag ]; then
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq .object.sha)
+          fi
+          if [ "$sha" != "$GITHUB_SHA" ]; then
+            echo "::error::The tag $TAG already exists on another commit ($sha)."
             exit 1
           fi
+          echo "::notice::The tag $TAG already exists on this commit. Creating it is skipped."
+          echo "exists=true" >>"$GITHUB_OUTPUT"
 
       - name: Build
         run: |
@@ -159,7 +170,7 @@ jobs:
           fi
 
       - name: Create the tag and GitHub release
-        if: env.IS_PUSH == 'true'
+        if: env.IS_PUSH == 'true' && steps.tag.outputs.exists != 'true'
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -169,6 +180,8 @@ jobs:
 
       - name: Set the release title and notes
         if: env.IS_PUSH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \

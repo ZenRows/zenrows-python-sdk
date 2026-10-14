@@ -29,7 +29,8 @@ jobs:
           trailer='(?i)^(Co-authored-by|Signed-off-by|Claude-Session|Generated-by|Assisted-by|Reviewed-by):'
           # Standard identifiers such as CVE-2024-1234, SHA-256, UTF-8 and ISO-8601 are not tracker keys.
           tracker='\b(?!(?:CVE|GHSA|SHA|UTF|ISO)-)[A-Z]{2,10}-[0-9]+\b'
-          attribution='(?i)\b(Claude|Anthropic|Copilot|ChatGPT|OpenAI|AI-generated|Generated with)\b'
+          # Attribution phrases only: product names such as Claude or OpenAI stay allowed.
+          attribution='(?i)(\bgenerated (with|by) (claude|chatgpt|copilot|openai|gemini|an? ai)\b|\bai-generated\b|noreply@anthropic\.com)'
           conventional='^((fix|feat|perf)\([a-z][a-z0-9-]*\)|(build|chore|ci|docs|refactor|revert|style|test)(\([a-z][a-z0-9-]*\))?)!?: \S'
           failed=0
 

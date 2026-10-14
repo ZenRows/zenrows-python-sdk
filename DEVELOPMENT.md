@@ -147,5 +147,5 @@ To release, merge that PR. Then approve the run in the `release`
 environment. The workflow runs the checks, creates the tag `vX.Y.Z` and the
 GitHub release, and publishes to PyPI.
 
-To publish an existing tag again, run the Release workflow by hand with that
-tag.
+To publish an existing tag again, run the Release workflow by hand from
+`main` with that tag.
