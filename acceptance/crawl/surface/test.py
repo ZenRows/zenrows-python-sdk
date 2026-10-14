@@ -857,17 +857,27 @@ def c22():
 
 def c23():
     """content(download=True): the same page, asked for as a file to save."""
+
+    def first_fetched(crawl_id):
+        return next(
+            (r for r in client.get(crawl_id, limit=100).results if r.content_url),
+            None,
+        )
+
+    # The stop in check 20 can land before any of B's pages is fetched. Then read
+    # a one-item html crawl that runs to the end instead, as check 9 does.
     b = state.get("B")
-    if not b:
-        return SKIP, "no html crawl to read a page from", ""
-    fetched = next(
-        (r for r in client.get(b.crawl_id, limit=100).results if r.content_url),
-        None,
-    )
+    src = b.crawl_id if b else None
+    fetched = first_fetched(src) if src else None
     if not fetched:
-        return SKIP, "no result had been fetched", ""
-    plain = client.content(b.crawl_id, fetched)
-    as_file = client.content(b.crawl_id, fetched, download=True)
+        own = create(**{**BASE, "max_items": 1, "output_format": "html"})
+        client.wait(own.crawl_id)
+        src = own.crawl_id
+        fetched = first_fetched(src)
+    if not fetched:
+        return FAIL, f"no result with a content_url on {src}", ""
+    plain = client.content(src, fetched)
+    as_file = client.content(src, fetched, download=True)
     return (
         pass_if(plain == as_file and bool(plain)),
         f"same {len(plain)} chars with and without download=True",
