@@ -67,6 +67,14 @@ jobs:
             fi
             git rev-parse -q --verify "refs/tags/$INPUT_TAG" >/dev/null || {
               echo "::error::The tag $INPUT_TAG does not exist."; exit 1; }
+            # Only a tag this workflow released: its commit is on main and it
+            # has a GitHub release. A hand-made tag on an unreviewed commit is refused.
+            [ "$GITHUB_REF" = refs/heads/main ] || {
+              echo "::error::Run the Release workflow from main."; exit 1; }
+            git merge-base --is-ancestor "refs/tags/$INPUT_TAG" HEAD || {
+              echo "::error::The tag $INPUT_TAG is not on main."; exit 1; }
+            gh release view "$INPUT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || {
+              echo "::error::The tag $INPUT_TAG has no GitHub release."; exit 1; }
             {
               echo "release=true"
               echo "version=${INPUT_TAG#v}"
@@ -77,10 +85,14 @@ jobs:
             exit 0
           fi
 
-          # This push must merge a release PR and change the manifest.
+          # This push must merge a release PR that release-please opened and
+          # change the manifest. Branch name alone is not enough: anyone with
+          # write access can name a branch. "tagged" keeps a full re-run working.
           pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '
             [.[] | select(.merged_at != null
-                          and (.head.ref | startswith("release-please--branches--main")))][0].number // empty')
+                          and (.head.ref | startswith("release-please--branches--main"))
+                          and .user.login == "github-actions[bot]"
+                          and ([.labels[].name] | any(. == "autorelease: pending" or . == "autorelease: tagged")))][0].number // empty')
           [ -n "$pr" ] || no_release "this push does not merge a release PR"
           if git diff --quiet "$BEFORE" "$GITHUB_SHA" -- "$manifest"; then no_release "the manifest did not change"; fi
 
