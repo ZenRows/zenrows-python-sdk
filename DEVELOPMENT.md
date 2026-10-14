@@ -143,8 +143,7 @@ After each merge to `main`, release-please opens or updates the PR
 `chore: release X.Y.Z`. It sets the version in `pyproject.toml`,
 `src/zenrows/__version__.py` and `uv.lock`. Do not change these by hand.
 
-To release, merge that PR. Then approve the run in the `release`
-environment. The workflow runs the checks, creates the tag `vX.Y.Z` and the
+To release, merge that PR. The workflow runs the checks, creates the tag `vX.Y.Z` and the
 GitHub release, and publishes to PyPI.
 
 To publish an existing tag again, run the Release workflow by hand from
@@ -163,5 +162,4 @@ next release PR. To recover:
    `gh release create vX.Y.Z --target <fix commit> --title vX.Y.Z --generate-notes --notes-start-tag <previous tag>`
 3. On the merged release PR, replace the label `autorelease: pending` with
    `autorelease: tagged`.
-4. Run the Release workflow by hand from `main` with the tag `vX.Y.Z`, and
-   approve it.
+4. Run the Release workflow by hand from `main` with the tag `vX.Y.Z`.
