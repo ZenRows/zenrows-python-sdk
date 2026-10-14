@@ -171,7 +171,7 @@ class ZenRowsCrawlClient:
         max_pages: int | None = None,
         include_patterns: list[str] | None = None,
         exclude_patterns: list[str] | None = None,
-        output_format: Literal["html"] | None = None,
+        output_format: Literal["html", "markdown"] | None = None,
         idempotency_key: str | None = None,
     ) -> Crawl:
         """`POST /crawls` — start a crawl and return it, `running`.
@@ -187,8 +187,9 @@ class ZenRowsCrawlClient:
           against each normalized URL. A URL is kept when it matches
           an include pattern (if any) and no exclude pattern. A crawl
           stays on the start URL's registrable domain; subdomains count.
-        - `output_format="html"`: also fetch every kept URL's page,
-          readable with `content` / `download`. Omit for URLs only.
+        - `output_format="html"` or `"markdown"`: also fetch every kept
+          URL's page, as HTML or as Markdown, readable with `content` /
+          `download`. Omit for URLs only.
         - `idempotency_key`: a retry with the same key and body answers
           with the crawl the first request created.
 
@@ -301,7 +302,8 @@ class ZenRowsCrawlClient:
 
     def content(self, crawl_id: str, content_id: str | CrawlResult) -> str:
         """`GET /crawls/{crawl_id}/contents/{content_id}` — one kept
-        URL's page, as HTML text.
+        URL's page, as text in the crawl's `output_format` (HTML or
+        Markdown).
 
         `content_id` is a `CrawlResult` whose `content_status` is
         `fetched`, its `content_url`, or its content id (the last

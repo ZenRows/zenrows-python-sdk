@@ -9,8 +9,8 @@ What's where:
   - `models` — hand-written pydantic v2 response models with open enums.
   - `errors.CrawlAPIError` — RFC 9457 problem+json mapping.
 
-`create(output_format="html")` also returns each kept URL's page;
-without it a crawl returns URLs only.
+`create(output_format="html")` or `create(output_format="markdown")` also
+returns each kept URL's page; without it a crawl returns URLs only.
 """
 
 from zenrows.crawl.client import (

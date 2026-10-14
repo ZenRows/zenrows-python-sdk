@@ -505,8 +505,9 @@ link hops from the start URL; without it the crawl has no depth limit.
 It stays on the start URL's registrable domain;
 subdomains count. It runs in the background: `create` returns at once with
 `status="running"`, and `wait` blocks until it ends. Without
-`output_format` a crawl returns URLs only; `output_format="html"` also
-returns each kept URL's page.
+`output_format` a crawl returns URLs only; `output_format="html"` or
+`output_format="markdown"` also returns each kept URL's page, as HTML or
+as Markdown.
 
 ```python
 import os

@@ -56,6 +56,7 @@ class OutputFormat(Enum):
     """The format the crawl returns each kept URL's page in."""
 
     HTML = "html"
+    MARKDOWN = "markdown"
 
     _missing_ = classmethod(open_enum_missing)
 

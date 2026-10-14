@@ -158,6 +158,21 @@ def test_create_sends_every_option_and_idempotency_key(client: ZenRowsCrawlClien
     assert "discovery" not in body
 
 
+@respx.mock
+def test_create_sends_markdown_output_format(client: ZenRowsCrawlClient):
+    route = respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=Response(202, json=crawl_body(output_format="markdown"))
+    )
+
+    crawl = client.create("https://example.com/", output_format="markdown")
+
+    assert crawl.output_format is OutputFormat.MARKDOWN
+    assert json.loads(route.calls.last.request.content) == {
+        "url": "https://example.com/",
+        "output_format": "markdown",
+    }
+
+
 # ----- get / list / stop -----
 
 
@@ -414,6 +429,15 @@ def test_content_accepts_result_url_or_id(client: ZenRowsCrawlClient):
     assert client.content("c_1", "/v1/crawls/c_1/contents/ct_a") == "<html>product</html>"
     assert client.content("c_1", "ct_a") == "<html>product</html>"
     assert route.call_count == 3
+
+
+@respx.mock
+def test_content_returns_markdown_text(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls/c_1/contents/ct_a").mock(
+        return_value=Response(200, headers={"Content-Type": "text/markdown"}, text="# Product")
+    )
+
+    assert client.content("c_1", "ct_a") == "# Product"
 
 
 def test_content_without_content_url_raises(client: ZenRowsCrawlClient):
