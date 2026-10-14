@@ -1297,9 +1297,10 @@ components:
 
         `extract` selects the structured-extraction contract family
         (`auto`, `native`, or `standard`); `extract_fields` optionally
-        narrows the returned fields. Extract is in private beta on the
-        scraper API — tasks against domains not enrolled fail with the
-        gateway's upgrade-required error.
+        narrows the returned fields. Extract works on any domain
+        Zenrows has prepared, with any active API key; a task against a
+        domain that isn't prepared yet fails with the scraper API's
+        403 `REQS007`.
 
         `custom_headers` additionally accepts an object of header
         name → value pairs (or that object serialised as a JSON

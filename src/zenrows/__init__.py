@@ -15,7 +15,7 @@ Three clients live here:
 
 from zenrows.__version__ import __version__
 from zenrows.batch import ZenRowsBatchClient
-from zenrows.client import ZenRowsClient
+from zenrows.client import ZenRowsClient, is_no_data_extracted
 from zenrows.crawl import CrawlAPIError, ZenRowsCrawlClient
 
 __all__ = [
@@ -24,4 +24,5 @@ __all__ = [
     "ZenRowsClient",
     "ZenRowsCrawlClient",
     "__version__",
+    "is_no_data_extracted",
 ]
