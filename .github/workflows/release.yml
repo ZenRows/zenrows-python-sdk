@@ -108,8 +108,8 @@ jobs:
             echo "sha=$GITHUB_SHA"
           } >>"$GITHUB_OUTPUT"
 
-  # Checks and build run with read-only rights, before anyone approves. The
-  # job that can mint a PyPI token runs no project code.
+  # Checks and build run with read-only rights. The job that can mint a PyPI
+  # token runs no project code.
   build:
     name: Check and build
     needs: detect
@@ -157,7 +157,7 @@ jobs:
     name: Tag, release and publish
     needs: [detect, build]
     runs-on: ubuntu-latest
-    # A person approves the release here.
+    # The release environment deploys only from main.
     environment: release
     concurrency:
       group: ${{ github.workflow }}-release
