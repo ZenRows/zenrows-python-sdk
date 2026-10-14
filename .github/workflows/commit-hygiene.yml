@@ -27,8 +27,8 @@ jobs:
         run: |
           set -euo pipefail
           trailer='(?i)^(Co-authored-by|Signed-off-by|Claude-Session|Generated-by|Assisted-by|Reviewed-by):'
-          # Standard identifiers such as CVE-2024-1234, SHA-256, UTF-8 and ISO-8601 are not tracker keys.
-          tracker='\b(?!(?:CVE|GHSA|SHA|UTF|ISO)-)[A-Z]{2,10}-[0-9]+\b'
+          # Standard identifiers such as CVE-2024-1234, SHA-256, UTF-8, ISO-8601, PEP-8, RFC-9110 and HTTP-2 are not tracker keys.
+          tracker='\b(?!(?:CVE|GHSA|SHA|UTF|ISO|PEP|RFC|HTTP)-)[A-Z]{2,10}-[0-9]+\b'
           # Attribution phrases only: product names such as Claude or OpenAI stay allowed.
           attribution='(?i)(\bgenerated (with|by) (claude|chatgpt|copilot|openai|gemini|an? ai)\b|\bai-generated\b|noreply@anthropic\.com)'
           conventional='^((fix|feat|perf)\([a-z][a-z0-9-]*\)|(build|chore|ci|docs|refactor|revert|style|test)(\([a-z][a-z0-9-]*\))?)!?: \S'
@@ -58,10 +58,13 @@ jobs:
           scan "PR title" <<<"$PR_TITLE"
           scan "PR body" <<<"$PR_BODY"
           scan "Branch name" <<<"$PR_BRANCH"
+          # Read the commits first, so a failed API call fails the check instead of scanning nothing.
+          commits=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            --jq '.[] | "\(.sha[0:12]) \(.commit.message | @base64)"')
+          [ -n "$commits" ] || { echo "::error::The PR has no commits to check."; exit 1; }
           while read -r sha message; do
             scan "Commit $sha" < <(base64 -d <<<"$message")
-          done < <(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
-            --jq '.[] | "\(.sha[0:12]) \(.commit.message | @base64)"')
+          done <<<"$commits"
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::Fix the PR title, body, branch name or commit messages listed above."

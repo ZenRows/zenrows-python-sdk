@@ -149,3 +149,19 @@ GitHub release, and publishes to PyPI.
 
 To publish an existing tag again, run the Release workflow by hand from
 `main` with that tag.
+
+### If the checks fail after the release PR is merged
+
+The release PR runs no CI, so its checks first run after the merge. If they
+fail, `main` already has the new version, but there is no tag, and the
+merged release PR keeps the `autorelease: pending` label, which blocks the
+next release PR. To recover:
+
+1. Fix the problem in a normal PR and merge it.
+2. Create the release on that fix commit, with the version from
+   `.release-please-manifest.json`:
+   `gh release create vX.Y.Z --target <fix commit> --title vX.Y.Z --generate-notes --notes-start-tag <previous tag>`
+3. On the merged release PR, replace the label `autorelease: pending` with
+   `autorelease: tagged`.
+4. Run the Release workflow by hand from `main` with the tag `vX.Y.Z`, and
+   approve it.
