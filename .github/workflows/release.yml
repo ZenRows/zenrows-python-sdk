@@ -22,6 +22,7 @@ jobs:
       group: ${{ github.workflow }}-release-pr
       cancel-in-progress: false
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -31,6 +32,20 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true
+
+      # A PR that GITHUB_TOKEN opens starts no workflows, so start CI on each
+      # open release PR here. Its results show on the release PR.
+      - name: Run CI on the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --author app/github-actions \
+            --label "autorelease: pending" --json headRefName --jq '.[].headRefName' |
+            while read -r branch; do
+              echo "Starting CI on $branch"
+              gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
+            done
 
   detect:
     name: Detect a release
