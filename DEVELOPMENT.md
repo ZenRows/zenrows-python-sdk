@@ -134,14 +134,18 @@ extensions to enum templates.
 `tests/test_open_enums.py` derives both sets from the spec and fails if a
 regeneration drops the hook or applies it to a strict enum.
 
-## Publishing
+## Releases
 
-```bash
-make clean
-make build                          # produces dist/*.whl + dist/*.tar.gz
-uv run twine upload dist/*          # or test PyPI:
-uv run twine upload --repository testpypi dist/*
-```
+Merge PRs with Conventional Commit titles, for example `fix(crawl): ...` or
+`feat(batch): ...`. `fix`, `feat` and `perf` need a scope.
 
-Bump `version` in `pyproject.toml` and `src/zenrows/__version__.py`
-together before each release.
+After each merge to `main`, release-please opens or updates the PR
+`chore: release X.Y.Z`. It sets the version in `pyproject.toml`,
+`src/zenrows/__version__.py` and `uv.lock`. Do not change these by hand.
+
+To release, merge that PR. Then approve the run in the `release`
+environment. The workflow runs the checks, creates the tag `vX.Y.Z` and the
+GitHub release, and publishes to PyPI.
+
+To publish an existing tag again, run the Release workflow by hand with that
+tag.

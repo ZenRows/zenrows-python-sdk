@@ -1,47 +1,202 @@
+# PyPI trusted publishing is bound to this file name. Do not rename it.
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and publish again, for example v1.7.1
+        required: true
+        type: string
 
-permissions:
-  contents: read
-  id-token: write
+permissions: {}
 
 jobs:
-  publish:
+  release-pr:
+    name: Open or update the release PR
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-release-pr
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
-      - name: "Fetch source code"
-        uses: actions/checkout@v4
-
-      - name: "Install uv"
-        uses: astral-sh/setup-uv@v3
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         with:
-          enable-cache: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-release: true
 
-      - name: "Install dependencies"
-        run: uv sync --all-extras
+  detect:
+    name: Detect a release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      release: ${{ steps.detect.outputs.release }}
+      version: ${{ steps.detect.outputs.version }}
+      tag: ${{ steps.detect.outputs.tag }}
+      previous_tag: ${{ steps.detect.outputs.previous_tag }}
+      ref: ${{ steps.detect.outputs.ref }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: "Verify tag matches pyproject.toml version"
-        if: github.event_name == 'release'
+      - id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
-          if [ "$TAG" != "$PKG" ]; then
-            echo "tag $GITHUB_REF_NAME ($TAG) does not match pyproject.toml version $PKG" >&2
+          set -euo pipefail
+          manifest=.release-please-manifest.json
+          no_release() { echo "release=false" >>"$GITHUB_OUTPUT"; echo "No release: $1"; exit 0; }
+
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            if ! [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::The tag must look like v1.2.3."; exit 1
+            fi
+            git rev-parse -q --verify "refs/tags/$INPUT_TAG" >/dev/null || {
+              echo "::error::The tag $INPUT_TAG does not exist."; exit 1; }
+            {
+              echo "release=true"
+              echo "version=${INPUT_TAG#v}"
+              echo "tag=$INPUT_TAG"
+              echo "ref=refs/tags/$INPUT_TAG"
+            } >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # This push must merge a release PR and change the manifest.
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '
+            [.[] | select(.merged_at != null
+                          and (.head.ref | startswith("release-please--branches--main")))][0].number // empty')
+          [ -n "$pr" ] || no_release "this push does not merge a release PR"
+          if git diff --quiet "$BEFORE" "$GITHUB_SHA" -- "$manifest"; then no_release "the manifest did not change"; fi
+
+          version=$(jq -r '."."' "$manifest")
+          previous=$(git show "$BEFORE:$manifest" | jq -r '."."')
+          echo "Release PR #$pr: v$previous -> v$version"
+          {
+            echo "release=true"
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "previous_tag=v$previous"
+            echo "ref=$GITHUB_SHA"
+          } >>"$GITHUB_OUTPUT"
+
+  release:
+    name: Tag, release and publish
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    # A person approves the release here.
+    environment: release
+    concurrency:
+      group: ${{ github.workflow }}-release
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.detect.outputs.version }}
+      TAG: ${{ needs.detect.outputs.tag }}
+      PREVIOUS_TAG: ${{ needs.detect.outputs.previous_tag }}
+      IS_PUSH: ${{ github.event_name == 'push' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.detect.outputs.ref }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+          enable-cache: false
+
+      - name: Run the checks
+        if: env.IS_PUSH == 'true'
+        run: |
+          set -euo pipefail
+          uv sync --all-extras --locked
+          make check
+          make generate
+          git diff --exit-code -I '^#   timestamp:' -- src/zenrows/batch/models.py
+          make test
+
+      - name: Stop if the tag already exists
+        if: env.IS_PUSH == 'true'
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::The tag $TAG already exists."
             exit 1
           fi
 
-      - name: "Lint, format check, and typecheck"
-        run: make check
+      - name: Build
+        run: |
+          set -euo pipefail
+          uv build
+          # The built version must be the release version.
+          test -f "dist/zenrows-$VERSION.tar.gz"
 
-      - name: "Unit tests"
-        run: make test
+      - name: Check PyPI
+        id: pypi
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/zenrows/$VERSION/json")
+          if [ "$status" = 200 ]; then
+            echo "::notice::zenrows $VERSION is already on PyPI. Publishing is skipped."
+            echo "published=true" >>"$GITHUB_OUTPUT"
+          fi
 
-      - name: "Build"
-        run: make build
+      - name: Create the tag and GitHub release
+        if: env.IS_PUSH == 'true'
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
 
-      - name: "Publish to PyPI"
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Set the release title and notes
+        if: env.IS_PUSH == 'true'
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f "tag_name=$TAG" -f "previous_tag_name=$PREVIOUS_TAG" --jq .body |
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file -
+
+      - name: Publish to PyPI
+        if: steps.pypi.outputs.published != 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+      - name: Verify on PyPI
+        run: |
+          for _ in $(seq 10); do
+            status=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/zenrows/$VERSION/json")
+            [ "$status" = 200 ] && exit 0
+            sleep 15
+          done
+          echo "::error::zenrows $VERSION is not on PyPI after 150 seconds."
+          exit 1
+
+      - name: Write the summary
+        if: always()
+        run: |
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          {
+            echo "## zenrows $VERSION"
+            echo "- Tag: [$TAG]($repo/tree/$TAG)"
+            echo "- Release: [$TAG]($repo/releases/tag/$TAG)"
+            echo "- PyPI: [zenrows $VERSION](https://pypi.org/project/zenrows/$VERSION/)"
+            echo "- Commit: [$(git rev-parse --short HEAD)]($repo/commit/$(git rev-parse HEAD))"
+          } >>"$GITHUB_STEP_SUMMARY"
