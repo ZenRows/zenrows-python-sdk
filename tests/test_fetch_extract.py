@@ -125,8 +125,8 @@ class TestFetchExtractErrorHandling(TestCase):
 
 
 class TestExtractAutoparseFallback(TestCase):
-    """`extract(mode="auto")` is a domain-gated open beta: AUTH010 means the
-    target domain isn't enabled yet. By default this retries once with
+    """`extract(mode="auto")`: AUTH010 means the target domain isn't enabled
+    for Extract. By default this retries once with
     Autoparse instead of raising - same behavior as the CLI's extract
     adapter."""
 
@@ -173,7 +173,7 @@ class TestExtractAutoparseFallback(TestCase):
     @mock.patch.object(Session, "request")
     def test_no_fallback_for_non_auto_mode(self, mock_request):
         """AUTH010 shouldn't trigger a fallback for native/standard modes -
-        only "auto" is the domain-gated beta path."""
+        only "auto" takes the fallback path."""
         mock_request.return_value = _fake_response(402, b'{"code": "AUTH010"}')
 
         response = self.client.extract(url, mode="native")
