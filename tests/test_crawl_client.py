@@ -232,6 +232,13 @@ def test_get_parses_failed_crawl_error(client: ZenRowsCrawlClient):
     assert page.error is not None and page.error.code is CrawlErrorCode.SEED_UNREACHABLE
 
 
+# What the server says when credits end a crawl, as error.detail.
+CREDIT_STOP_DETAIL = {
+    "insufficient_credits": "The crawl stopped because your account has no credits left.",
+    "api_key_cap_reached": "The crawl stopped because your API key reached one of its credit caps.",
+}
+
+
 @pytest.mark.parametrize(
     ("code", "member"),
     [
@@ -248,7 +255,7 @@ def test_wait_returns_crawl_stopped_on_credits(
             200,
             json=crawl_body(
                 status="stopped",
-                error={"code": code, "detail": "Batch stopped the crawl."},
+                error={"code": code, "detail": CREDIT_STOP_DETAIL[code]},
                 results=[],
                 next_cursor=None,
             ),
