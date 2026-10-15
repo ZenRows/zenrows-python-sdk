@@ -680,7 +680,11 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
             200,
             json=crawl_body(
                 status="failed",
-                error={"code": "no_items_found", "detail": "No URL matched."},
+                error={
+                    "code": "no_items_found",
+                    "detail": "The crawl found no items: the pages it fetched held no links "
+                    "or listings it could follow.",
+                },
                 results=[],
                 next_cursor=None,
             ),
