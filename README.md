@@ -30,6 +30,7 @@ This package ships three clients:
   - [PUT Requests](#put-requests)
   - [Concurrency](#concurrency)
   - [Extract](#extract)
+    - [Preparing a domain](#preparing-a-domain)
 - [Quickstart — Batch API (`ZenRowsBatchClient`)](#quickstart--batch-api-zenrowsbatchclient)
   - [Extract in a batch](#extract-in-a-batch)
   - [Upload URLs from a CSV](#upload-urls-from-a-csv)
@@ -204,13 +205,45 @@ print(response.json())
 
 `extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
 
-Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means the domain isn't prepared for Extract yet: prepare it with `POST /v1/extract/prepared-domains`, or pass `fallback_to_autoparse=True` to retry with deprecated autoparse. The legacy `402` with `code: "AUTH010"` is handled the same way. By default `extract()` returns both error responses to you as is, without a second request.
+Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means the domain isn't prepared for Extract yet: prepare it with `POST /v1/extract/prepared-domains` (`client.prepare_domain()`, see below), or pass `fallback_to_autoparse=True` to retry with deprecated autoparse. The legacy `402` with `code: "AUTH010"` is handled the same way. By default `extract()` returns both error responses to you as is, without a second request.
 
 ```python
 # Opt in to one retry with the deprecated autoparse on REQS007 / AUTH010.
 # The retry is a second, separately charged request.
 response = client.extract(url, fallback_to_autoparse=True)
 ```
+
+#### Preparing a domain
+
+`client.prepare_domain(domain, example_urls)` submits a domain for Extract (`POST /v1/extract/prepared-domains`), and `client.prepared_domain_status(domain)` reads where it is (`GET /v1/extract/prepared-domains/{domain}`). Both return the parsed status object. Pass the domain without a scheme and 1 to 5 example URLs, one per kind of page you want to extract. These calls cost no credits.
+
+Preparation takes minutes, and the client does not wait for it. Poll the status until it is no longer `"preparing"`:
+
+```python
+import time
+
+from zenrows import PreparedDomainError, ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY")
+
+try:
+    status = client.prepare_domain(
+        "www.scrapingcourse.com",
+        ["https://www.scrapingcourse.com/ecommerce/"],
+    )
+except PreparedDomainError as err:
+    # e.g. 409 in_progress, 429 out_of_allowance, 503 overloaded
+    print(err.status_code, err.code, err.detail)
+    raise
+
+while status["status"] == "preparing":
+    time.sleep(30)
+    status = client.prepared_domain_status("www.scrapingcourse.com")
+
+print(status["status"])  # "ready" or "failed" (see status["failure"])
+```
+
+Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints) for every status and failure code.
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
 
