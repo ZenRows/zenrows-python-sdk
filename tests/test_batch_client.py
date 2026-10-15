@@ -15,6 +15,7 @@ import respx
 from httpx import Response
 
 from zenrows import ZenRowsBatchClient
+from zenrows.__version__ import __version__
 from zenrows.batch import BatchAPIError, IngestStatus, JobStatus, JobType, TaskResult, WaiterTimeout
 
 BASE_URL = "http://localhost:9000/v1"
@@ -56,6 +57,7 @@ def test_submit_job_sends_api_key_and_returns_typed_response(client: ZenRowsBatc
 
     sent = route.calls.last.request
     assert sent.headers["X-API-Key"] == API_KEY
+    assert sent.headers["User-Agent"] == f"zenrows/{__version__} python"
     assert sent.headers["Content-Type"] == "application/json"
     assert json.loads(sent.content) == {
         "type": "regular",

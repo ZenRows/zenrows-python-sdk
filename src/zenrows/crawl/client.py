@@ -42,7 +42,9 @@ from zenrows.crawl.models import (
 )
 
 _DEFAULT_BASE_URL = "https://api.zenrows.com/v1"
-DEFAULT_USER_AGENT = f"zenrows-crawl-python/{__version__}"
+# Every client in this SDK sends the same User-Agent, so the API reads all
+# of them as Python SDK traffic.
+DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 
 _log = logging.getLogger("zenrows.crawl.transport")
 
