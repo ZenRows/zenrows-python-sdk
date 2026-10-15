@@ -500,7 +500,10 @@ Crawl is still evolving: new features are coming, limits may be tuned, and the c
 
 A crawl starts from one URL, follows the links on each page, and keeps
 the URLs that match your patterns, up to `max_items`. It stops at
-`max_items` or `max_pages`, or when no link is left. `depth` limits the
+`max_items` or `max_pages`, or when no link is left. Patterns filter
+what the crawl returns, not what it opens: it still opens on-site pages
+that fail them to reach pages that match, and every page it opens counts
+toward `max_pages` and is billed. `depth` limits the
 link hops from the start URL; without it the crawl has no depth limit.
 It stays on the start URL's registrable domain;
 subdomains count. It runs in the background: `create` returns at once with

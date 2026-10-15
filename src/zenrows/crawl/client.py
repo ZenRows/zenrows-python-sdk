@@ -183,11 +183,17 @@ class ZenRowsCrawlClient:
         - `max_items`: stop after keeping this many URLs (server
           default 100).
         - `max_pages`: stop after fetching this many pages, which
-          bounds the cost (server default 100).
+          bounds the cost (server default 100). Every page the crawl
+          opens counts and is billed, returned or not.
         - `include_patterns` / `exclude_patterns`: substrings matched
           against each normalized URL. A URL is kept when it matches
-          an include pattern (if any) and no exclude pattern. A crawl
-          stays on the start URL's registrable domain; subdomains count.
+          an include pattern (if any) and no exclude pattern. They
+          filter what the crawl returns, not what it opens: it still
+          opens on-site pages that fail them, to reach pages that
+          match, and those fetches count toward `max_pages` and are
+          billed. A crawl whose patterns match nothing ends `completed`
+          with no results. A crawl stays on the start URL's registrable
+          domain; subdomains count.
         - `output_format="html"` or `"markdown"`: also fetch every kept
           URL's page, as HTML or as Markdown, readable with `content` /
           `download`. Omit for URLs only.
