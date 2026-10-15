@@ -36,6 +36,10 @@ def main() -> None:
                 print(f"job missing or foreign: {exc.problem and exc.problem.detail}")
             case "unauthenticated":
                 print("bad API key — check ZENROWS_API_KEY")
+            case "subscription_inactive":
+                # The key is valid; the subscription is past due, unpaid,
+                # incomplete or paused. Re-entering the key won't help.
+                print("subscription not active — fix it at app.zenrows.com/billing")
             case "payment_required":
                 print("out of credits — top up at zenrows.com")
             case _:
