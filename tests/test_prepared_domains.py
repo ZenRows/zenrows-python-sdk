@@ -5,7 +5,7 @@ PreparedDomainError it raises on every documented error answer."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from unittest import TestCase
+from unittest import IsolatedAsyncioTestCase, TestCase
 
 from zenrows import PreparedDomainError, ZenRowsClient
 
@@ -199,3 +199,103 @@ class TestPreparedDomains(TestCase):
         self.assertEqual(caught.exception.status_code, 502)
         self.assertIsNone(caught.exception.code)
         self.assertIsNone(caught.exception.problem)
+
+    def test_empty_domain_is_rejected_before_any_request(self):
+        for domain in ("", "   ", "\t\n"):
+            with self.subTest(domain=domain):
+                with self.assertRaises(ValueError):
+                    self.client.prepared_domain_status(domain)
+                with self.assertRaises(ValueError):
+                    self.client.prepare_domain(domain, ["https://www.example.com/"])
+
+        self.assertEqual(self.api.requests, [])
+
+
+class TestPreparedDomainsIgnoreRetries(TestCase):
+    """The client's `retries` apply to scraping only: a 429 or 503 from the
+    prepared-domains endpoints is returned on the first answer."""
+
+    def setUp(self):
+        self.api = _StubAPI()
+        self.addCleanup(self.api.close)
+        self.client = ZenRowsClient(apikey, retries=1, base_url=self.api.base_url)
+        self.addCleanup(self.client.close)
+
+    def test_status_503_is_not_retried(self):
+        self.api.reply(503, _problem(503, "overloaded"))
+        self.api.reply(200, PREPARING)
+
+        with self.assertRaises(PreparedDomainError) as caught:
+            self.client.prepared_domain_status("www.example.com")
+
+        self.assertEqual(caught.exception.code, "overloaded")
+        self.assertEqual(len(self.api.requests), 1)
+
+    def test_prepare_429_is_not_retried(self):
+        self.api.reply(429, _problem(429, "out_of_allowance"))
+        self.api.reply(202, PREPARING)
+
+        with self.assertRaises(PreparedDomainError) as caught:
+            self.client.prepare_domain("www.example.com", ["https://www.example.com/"])
+
+        self.assertEqual(caught.exception.code, "out_of_allowance")
+        self.assertEqual(len(self.api.requests), 1)
+
+    def test_scraping_keeps_its_retries(self):
+        """Control: the same client still retries a 503 on a scraping request."""
+        self.api.reply(503, b"busy")
+        self.api.reply(200, b"ok")
+
+        response = self.client.fetch("https://www.example.com/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.api.requests), 2)
+
+
+class TestPreparedDomainsAsync(IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.api = _StubAPI()
+        self.addCleanup(self.api.close)
+        self.client = ZenRowsClient(apikey, concurrency=2, base_url=self.api.base_url)
+        self.addCleanup(self.client.close)
+
+    async def test_prepare_domain_async_returns_the_status(self):
+        self.api.reply(202, PREPARING)
+
+        status = await self.client.prepare_domain_async(
+            "www.example.com", ["https://www.example.com/a"]
+        )
+
+        self.assertEqual(status, PREPARING)
+        sent = self.api.requests[0]
+        self.assertEqual(sent["method"], "POST")
+        self.assertEqual(
+            sent["body"],
+            {"domain": "www.example.com", "example_urls": ["https://www.example.com/a"]},
+        )
+
+    async def test_prepared_domain_status_async_returns_the_status(self):
+        self.api.reply(200, {**PREPARING, "status": "ready"})
+
+        status = await self.client.prepared_domain_status_async("www.example.com")
+
+        self.assertEqual(status["status"], "ready")
+        self.assertEqual(
+            self.api.requests[0]["path"], "/v1/extract/prepared-domains/www.example.com"
+        )
+
+    async def test_async_errors_raise_prepared_domain_error(self):
+        self.api.reply(404, _problem(404, "not_found"))
+
+        with self.assertRaises(PreparedDomainError) as caught:
+            await self.client.prepared_domain_status_async("www.example.com")
+
+        self.assertEqual(caught.exception.code, "not_found")
+
+    async def test_async_rejects_an_empty_domain(self):
+        with self.assertRaises(ValueError):
+            await self.client.prepared_domain_status_async(" ")
+        with self.assertRaises(ValueError):
+            await self.client.prepare_domain_async("", ["https://www.example.com/"])
+
+        self.assertEqual(self.api.requests, [])

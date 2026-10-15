@@ -65,6 +65,21 @@ def is_no_data_extracted(response: requests.Response) -> bool:
 _EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
 
 
+def _check_domain(domain: str) -> None:
+    # An empty domain would request the list endpoint and read its answer as
+    # a status, so it never leaves the client.
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError("domain must be a non-empty string")
+
+
+def _prepared_domains_request(method: str, url: str, **kwargs: Any) -> requests.Response:
+    # Not through `requests_session`: its retry adapter would retry a 429 or
+    # 503, which these endpoints use for answers to read (out_of_allowance,
+    # overloaded). The Go and Node SDKs skip client retries here too.
+    with requests.Session() as session:
+        return session.request(method, url, **kwargs)
+
+
 def _prepared_domain_body(response: requests.Response) -> dict:
     if not response.ok:
         raise PreparedDomainError.from_response(response)
@@ -327,11 +342,14 @@ class ZenRowsClient:
         `"preparing"`. These endpoints don't fetch pages and cost no
         credits.
 
-        Raises `PreparedDomainError` on a non-2xx answer, for example 400
+        The client's `retries` setting doesn't apply to these endpoints.
+        Raises `ValueError` for an empty `domain`, before any request, and
+        `PreparedDomainError` on a non-2xx answer, for example 400
         `invalid_argument`, 409 `in_progress`, 429 `out_of_allowance` or
         503 `overloaded` / `disabled`.
         """
-        response = self.requests_session.request(
+        _check_domain(domain)
+        response = _prepared_domains_request(
             "POST",
             self._prepared_domains_url(),
             json={"domain": domain, "example_urls": list(example_urls)},
@@ -346,10 +364,12 @@ class ZenRowsClient:
         failed preparation carries a `failure` object with `code`, `detail`
         and `slot_consumed`. `state` and `roles` report progress.
 
-        Raises `PreparedDomainError` on a non-2xx answer, for example 404
+        Raises `ValueError` for an empty `domain`, before any request, and
+        `PreparedDomainError` on a non-2xx answer, for example 404
         `not_found` when your account never submitted `domain`.
         """
-        response = self.requests_session.request(
+        _check_domain(domain)
+        response = _prepared_domains_request(
             "GET",
             f"{self._prepared_domains_url()}/{quote(domain, safe='')}",
             headers=self._prepared_domains_headers(),
@@ -408,6 +428,21 @@ class ZenRowsClient:
             return await self.fetch_async(url, autoparse_params, headers, **kwargs)
 
         return response
+
+    async def prepare_domain_async(self, domain: str, example_urls: list[str]) -> dict:
+        """Async counterpart of `prepare_domain()`, run on the client's thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self.executor, partial(self.prepare_domain, domain, example_urls)
+        )
+
+    async def prepared_domain_status_async(self, domain: str) -> dict:
+        """Async counterpart of `prepared_domain_status()`, run on the client's
+        thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self.executor, partial(self.prepared_domain_status, domain)
+        )
 
     async def post_async(
         self,

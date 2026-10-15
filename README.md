@@ -243,6 +243,8 @@ while status["status"] == "preparing":
 print(status["status"])  # "ready" or "failed" (see status["failure"])
 ```
 
+`prepare_domain_async()` and `prepared_domain_status_async()` are the async counterparts. The client's `retries` setting doesn't apply to these calls, and an empty `domain` raises `ValueError` before any request.
+
 Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints) for every status and failure code.
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
