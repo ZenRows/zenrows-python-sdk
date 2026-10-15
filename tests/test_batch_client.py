@@ -1178,3 +1178,236 @@ def test_submit_job_post_task_method_body_on_wire(client: ZenRowsBatchClient):
     assert sent["tasks"][0]["body"] == {"query": "{ products { id } }"}
     assert "method" not in sent["tasks"][1]
     assert "body" not in sent["tasks"][1]
+
+
+# ===== rows with no body, and fields the server sends verbatim =====
+
+
+def _row_json(task_id: str, status: str, result_url: str | None = None) -> dict:
+    data = {
+        "task_id": task_id,
+        "run_id": "R",
+        "url": "https://example.com/" + task_id,
+        "status": status,
+        "created_at": "2026-08-25T12:00:00Z",
+        "updated_at": "2026-08-25T12:00:05Z",
+    }
+    if result_url:
+        data["result_url"] = result_url
+        data["type"] = "html"
+    return data
+
+
+@pytest.mark.parametrize("concurrency", [1, 4])
+@respx.mock
+def test_bulk_downloads_skip_rows_without_a_body(
+    client: ZenRowsBatchClient, tmp_path, caplog, concurrency
+):
+    """An `expired` row (past the visibility window) or a failed row has
+    no `result_url`: bulk downloads skip it, count it, and keep going."""
+    url = "https://storage.example.test/bodies/T1.html?sig=abc"
+    respx.get(url).mock(return_value=Response(200, content=b"<html>ok</html>"))
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(
+            200,
+            json={
+                "results": [
+                    _row_json("T1", "successful", url),
+                    _row_json("T2", "expired"),
+                    _row_json("T3", "failed"),
+                ]
+            },
+        )
+    )
+    run = client.run("J", "R")
+
+    with caplog.at_level("WARNING", logger="zenrows.batch.download"):
+        written = run.download_to_dir(tmp_path, status=None, concurrency=concurrency)
+    assert written == 1
+    assert [p.name for p in tmp_path.iterdir()] == ["T1.html"]
+    assert "skipped 2 result(s)" in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="zenrows.batch.download"):
+        bodies = run.download_to_memory(status=None, concurrency=concurrency)
+    assert [b.task_id for b in bodies] == ["T1"]
+    assert "skipped 2 result(s)" in caplog.text
+
+
+@respx.mock
+def test_bulk_download_skip_message_counts_each_status(
+    client: ZenRowsBatchClient, tmp_path, caplog
+):
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(
+            200,
+            json={
+                "results": [
+                    _row_json("T1", "expired"),
+                    _row_json("T2", "failed"),
+                    _row_json("T3", "pending"),
+                    _row_json("T4", "processing"),
+                ]
+            },
+        )
+    )
+    with caplog.at_level("WARNING", logger="zenrows.batch.download"):
+        assert client.run("J", "R").download_to_dir(tmp_path, status=None) == 0
+    assert "skipped 4 result(s)" in caplog.text
+    assert "1 expired, 1 failed, 1 pending, 1 processing" in caplog.text
+
+
+@respx.mock
+def test_successful_row_without_url_is_refetched_once(client: ZenRowsBatchClient, tmp_path):
+    """A successful row with no `result_url` means the link wasn't signed
+    on that read: the page is fetched again and the row is downloaded."""
+    url = "https://storage.example.test/bodies/T1.html?sig=abc"
+    respx.get(url).mock(return_value=Response(200, content=b"<html>ok</html>"))
+    page = respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        side_effect=[
+            Response(200, json={"results": [_row_json("T1", "successful")]}),
+            Response(200, json={"results": [_row_json("T1", "successful", url)]}),
+        ]
+    )
+    assert client.run("J", "R").download_to_dir(tmp_path) == 1
+    assert page.call_count == 2
+    assert (tmp_path / "T1.html").read_bytes() == b"<html>ok</html>"
+
+
+@respx.mock
+def test_successful_row_still_without_url_raises(client: ZenRowsBatchClient, tmp_path):
+    """If the second read still has no link, the download fails loudly
+    instead of dropping a successful result."""
+    from zenrows.batch import ResultURLUnavailable
+
+    page = respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(200, json={"results": [_row_json("T1", "successful")]})
+    )
+    with pytest.raises(ResultURLUnavailable) as exc:
+        client.run("J", "R").download_to_memory()
+    assert exc.value.task_ids == ["T1"]
+    assert page.call_count == 2
+
+
+def test_task_result_parses_expired():
+    from zenrows.batch import TaskStatus
+
+    row = TaskResult.model_validate(_row_json("T1", "expired"))
+    assert row.status is TaskStatus.EXPIRED
+    assert row.result_url is None
+    assert row.url.host == "example.com"  # still an AnyUrl, as before
+
+
+def test_run_carries_trigger():
+    from zenrows.batch import Run
+    from zenrows.batch.models import RunTrigger
+
+    run = Run.model_validate(
+        {
+            "run_id": "R",
+            "job_id": "J",
+            "run_sequence": 1,
+            "status": "completed",
+            "trigger": "scheduled",
+            "stats": {"total": 1, "completed": 1, "successful": 1, "failed": 0},
+            "created_at": "2026-08-25T12:00:00Z",
+            "updated_at": "2026-08-25T12:00:05Z",
+        }
+    )
+    assert run.trigger is RunTrigger.SCHEDULED
+
+
+@respx.mock
+def test_add_tasks_sends_idempotency_key_and_retries(client: ZenRowsBatchClient, no_sleep):
+    """With a key, add_tasks is safe to replay: the header is sent and a
+    transient 503 is retried. Without one, it is sent once."""
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(
+        side_effect=[
+            Response(503, json={"code": "unavailable"}),
+            Response(
+                200,
+                json={
+                    "accepted_tasks": 1,
+                    "job_status": "open",
+                    "latest_run": {
+                        "run_id": "R",
+                        "job_id": "J",
+                        "run_sequence": 1,
+                        "status": "pending",
+                        "stats": {"total": 1, "completed": 0, "successful": 0, "failed": 0},
+                        "created_at": "2026-08-25T12:00:00Z",
+                        "updated_at": "2026-08-25T12:00:05Z",
+                    },
+                },
+            ),
+        ]
+    )
+    client.job("J").add_tasks(
+        {"tasks": [{"url": "https://example.com/a"}]}, idempotency_key="add-1"
+    )
+    assert route.call_count == 2
+    assert all(c.request.headers["Idempotency-Key"] == "add-1" for c in route.calls)
+
+
+@respx.mock
+def test_add_tasks_without_a_key_is_sent_once(client: ZenRowsBatchClient, no_sleep):
+    """No key means the POST may not be replayed: a 503 surfaces at once."""
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(
+        return_value=Response(503, json={"code": "unavailable"})
+    )
+    with pytest.raises(BatchAPIError):
+        client.job("J").add_tasks({"tasks": [{"url": "https://example.com/a"}]})
+    assert route.call_count == 1
+    assert "Idempotency-Key" not in route.calls.last.request.headers
+
+
+def test_result_url_unavailable_is_still_a_value_error():
+    """Bulk downloads raised ValueError for a URL-less row before; the new
+    exception keeps `except ValueError` working."""
+    from zenrows.batch import ResultURLUnavailable
+
+    assert issubclass(ResultURLUnavailable, ValueError)
+    err = ResultURLUnavailable([f"T{i}" for i in range(7)])
+    assert err.task_ids[0] == "T0"
+    assert "7 successful result(s)" in str(err) and str(err).endswith(", ...")
+
+
+def test_deprecated_task_spend_still_imports_and_parses():
+    import warnings
+
+    from zenrows.batch.models import TaskSpend
+
+    spend = {"credits": 1, "cost": 0.1}
+    row = TaskResult.model_validate(
+        {**_row_json("T1", "successful"), "spend": {"total": spend, "last_attempt": spend}}
+    )
+    with warnings.catch_warnings():
+        # Deprecated in the docs only: reading it must not warn, so
+        # projects that turn warnings into errors keep working.
+        warnings.simplefilter("error")
+        assert isinstance(row.spend, TaskSpend)
+        assert row.spend.total.credits == 1
+        assert TaskResult.model_validate(_row_json("T2", "successful")).spend is None
+
+
+@respx.mock
+def test_bulk_download_cap_still_applies_after_skipping(client: ZenRowsBatchClient, tmp_path):
+    from zenrows.batch import DownloadLimitExceeded
+
+    url = "https://storage.example.test/bodies/T{}.html?sig=abc"
+    for i in (1, 2):
+        respx.get(url.format(i)).mock(return_value=Response(200, content=b"x"))
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(
+            200,
+            json={
+                "results": [
+                    _row_json("T0", "failed"),
+                    _row_json("T1", "successful", url.format(1)),
+                    _row_json("T2", "successful", url.format(2)),
+                ]
+            },
+        )
+    )
+    with pytest.raises(DownloadLimitExceeded):
+        client.run("J", "R").download_to_dir(tmp_path, status=None, max_files=1)

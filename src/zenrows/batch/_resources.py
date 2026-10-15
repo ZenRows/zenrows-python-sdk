@@ -226,9 +226,10 @@ class RunRef:
         the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps the export size per run; for larger runs use
+        ``download_to_dir``, bound only by its own configurable limits
+        (``max_files``, ``max_bytes_per_file``) and slower: one body at a
+        time, tunable via ``concurrency=``."""
         return self._client.download_all_results(
             self.job_id,
             self.run_id,
@@ -279,7 +280,7 @@ class ExportRef:
     A results export is async: ``start_export()`` returns immediately
     with a ``pending`` ref; the server zips the run in the background
     and it reaches ``completed`` (download URL ready) or ``failed``
-    (with an ``error`` message — e.g. the 1 GiB size cap). Call
+    (with an ``error`` message, e.g. when the run is over the size cap). Call
     ``load()`` / ``wait()`` for an :class:`ExportHandle` with data.
     """
 
@@ -594,9 +595,10 @@ class CurrentRun:
         and save the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps the export size per run; for larger runs use
+        ``download_to_dir``, bound only by its own configurable limits
+        (``max_files``, ``max_bytes_per_file``) and slower: one body at a
+        time, tunable via ``concurrency=``."""
         return self._client.download_all_results(
             self.job_id,
             self._current_run_id(),
@@ -786,9 +788,20 @@ class JobRef:
 
     # ----- tasks (write path) -----
 
-    def add_tasks(self, body: AddTasksRequest | AddTasksDict) -> AddTasksResponse:
-        """``POST /jobs/{id}/tasks`` — append to the open initial run."""
-        return self._client._post_tasks(self.job_id, body)
+    def add_tasks(
+        self,
+        body: AddTasksRequest | AddTasksDict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> AddTasksResponse:
+        """``POST /jobs/{id}/tasks``: append to the open initial run.
+
+        Pass ``idempotency_key`` to make the call safe to retry: a repeat
+        with the same key and body replays the first answer instead of
+        adding the tasks twice, and the transport then retries this POST
+        on transient errors. Without a key every call appends its tasks
+        and a failed call is not retried automatically."""
+        return self._client._post_tasks(self.job_id, body, idempotency_key=idempotency_key)
 
     # ----- runs (list) -----
 

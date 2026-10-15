@@ -268,7 +268,8 @@ job = client.submit_regular(
 
 An Extract task's result carries two keys — `html` (the raw page) and `parsed`
 (the structured data). It costs the same as a regular task, so `estimate_cost`
-prices it correctly. `extract_fields` is not supported in Batch yet.
+prices it correctly. Add `extract_fields` next to `extract` to narrow the
+fields returned.
 
 ### Upload URLs from a CSV
 
@@ -310,11 +311,12 @@ print(est.format())  # per-tier breakdown table
 > it lives on the client (`client.estimate_cost`) to keep your call
 > sites stable.
 
-After a run finishes, read the **actual** credits it used from
-`run.stats.spend` (`{credits, cost}`). Only successful requests are
-charged, so realized spend is ≤ the estimate. (Per-task `task.spend` is
-indicative and often absent on successful rows — rely on the run-level
-rollup for actuals.)
+After a run finishes, `run.stats.spend` (`{credits, cost}`) shows the
+spend the API recorded for it. It is indicative, not billing-grade: your
+account's usage and invoices are the authoritative figures. Successful
+requests are charged, and so are target `404` / `410` responses, which
+show up as failed tasks. Result rows carry no per-task spend: use the
+run-level rollup.
 
 ### Retry only the failed tasks
 
@@ -382,9 +384,16 @@ artifact:
 run.download_all_results("results.zip")
 ```
 
-> The server-side zip is capped at **1 GiB** per run. For larger runs —
-> or one file per task — use `download_to_dir`, which fetches bodies
-> client-side with **no size limit** (slower; tune with `concurrency=`).
+> The server-side zip has a size cap per run. For larger runs, or one
+> file per task, use `download_to_dir`, which fetches bodies client-side.
+> It is not bound by the export cap, only by its own configurable limits
+> (`max_files`, `max_bytes_per_file`), and is slower (tune with
+> `concurrency=`). Rows with no body to fetch (failed tasks, rows not
+> finished yet, and results past the 14-day visibility window, which come
+> back as `expired`) are skipped and counted in a warning log record. A
+> `successful` row that comes back without a `result_url` is fetched once
+> more; if its link is still missing, the download raises
+> `ResultURLUnavailable` instead of dropping it.
 
 **One task at a time.** When you're iterating `results()` and want only
 some bodies (a Python-side filter the `status=` argument can't express),
@@ -438,14 +447,31 @@ job.schedule.update(Rate(every=1, unit="day"))  # replace the schedule
 Register a completion webhook at submit time, or manage it later via
 `PUT` / `DELETE /jobs/{id}/webhook`. Set `signature=True` to have each
 delivery HMAC-signed (manage signing keys via the `/hmac/keys`
-endpoints); it defaults to unsigned. Deliveries are at-least-once, so
-dedup on the `X-ZenRows-Event-Id` header.
+endpoints); it defaults to unsigned. You get one event per run that
+completes or fails on its own; stopping a run sends nothing. Delivery is
+best-effort: a failed delivery is retried with backoff for a bounded
+window, so an event can arrive more than once, and is not guaranteed.
+Dedupe on the `X-ZenRows-Event-Id` header.
 
 ```python
 client.submit_regular(
     ["https://example.com/a"],
     webhook={"url": "https://hooks.example.com/zr", "signature": True},
 )
+```
+
+Each delivery is one POST when a run finishes (`run.completed` or
+`run.failed`), carrying the run's ids and stats, not the results. On a
+signed delivery, check the `X-Signature` header with `verify_webhook`.
+Pass the raw request body and the secret exactly as the API showed it
+(base64); the helper decodes it, picks the key by `kid`, and rejects
+deliveries older than five minutes:
+
+```python
+from zenrows.batch import verify_webhook
+
+if not verify_webhook(request.body, request.headers["X-Signature"], {kid: secret_b64}):
+    return 401
 ```
 
 > No webhook receiver? Just poll for completion with `job.run.wait()` /

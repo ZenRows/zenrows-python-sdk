@@ -120,7 +120,7 @@ def submit_regular(urls: list[str | TaskInputDict] | None = None,
 Submit a one-shot scraping job (closed, all tasks upfront).
 
 Pass `urls` as either bare strings or inline dicts carrying
-per-task `external_id` / `metadata` / `params`:
+per-task `external_id` / `metadata` / `zenrows_params`:
 
     client.submit_regular(["https://a", "https://b"])
     client.submit_regular([
@@ -417,8 +417,7 @@ until `timeout`. Pass `failure_statuses={"failed"}` to have the
 waiter raise `WaiterError` on it instead.
 
 `progress=True` shows a tqdm bar with totals as they advance.
-`None` inherits the client-level `progress` setting (which
-itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
+It is off by default.
 
 <a id="ZenRowsBatchClient.create_job_input"></a>
 
@@ -527,8 +526,8 @@ carrying the just-issued `export_id`; call `.load()` or block on
 
 Failure modes: 404 if the job/run is missing or not yours.
 The worker fails the export (status=failed,
-error="results are larger then 1 gb") if the pre-zip total
-exceeds the server's 1 GiB cap.
+error="results are larger than N gb") if the pre-zip total
+exceeds the server's export size cap.
 
 <a id="ZenRowsBatchClient.get_results_export"></a>
 
@@ -564,7 +563,7 @@ Block until an export reaches a terminal state. Defaults to
 check `.status` and (on `completed`) `.download_url`.
 
 `failed` is NOT raised; the caller decides whether
-`error="results are larger then 1 gb"` is fatal or expected.
+`error="results are larger than N gb"` is fatal or expected.
 
 <a id="ZenRowsBatchClient.download_all_results"></a>
 
@@ -591,12 +590,13 @@ Steps:
 Raises `WaiterTimeout` if the export doesn't reach a terminal
 state within `wait_timeout`. Raises `BatchAPIError` with the
 server's error message on `status=failed` (e.g.
-`"results are larger then 1 gb"`). Returns the `Path` written.
+`"results are larger than N gb"`). Returns the `Path` written.
 
-The server-side export is capped at 1 GiB per run. For larger
+The server-side export has a size cap per run. For larger
 runs (or one file per task), use `download_to_dir` instead: it
-fetches each body client-side with no size limit, at the cost
-of being slower (one body at a time, tunable via `concurrency=`).
+fetches each body client-side, bound only by its own configurable
+limits (`max_files`, `max_bytes_per_file`), at the cost of being
+slower (one body at a time, tunable via `concurrency=`).
 
 # Job, run & export handles
 
@@ -748,9 +748,10 @@ Start an export of this run's results, wait for it, and save
 the zip to ``target_path``. See
 ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-Capped at 1 GiB per run server-side; for larger runs use
-``download_to_dir`` (no size limit, but slower — one body at a
-time, tunable via ``concurrency=``).
+The server caps the export size per run; for larger runs use
+``download_to_dir``, bound only by its own configurable limits
+(``max_files``, ``max_bytes_per_file``) and slower: one body at a
+time, tunable via ``concurrency=``.
 
 <a id="RunHandle"></a>
 
@@ -798,7 +799,7 @@ A reference to a results-export by id.
 A results export is async: ``start_export()`` returns immediately
 with a ``pending`` ref; the server zips the run in the background
 and it reaches ``completed`` (download URL ready) or ``failed``
-(with an ``error`` message — e.g. the 1 GiB size cap). Call
+(with an ``error`` message, e.g. when the run is over the size cap). Call
 ``load()`` / ``wait()`` for an :class:`ExportHandle` with data.
 
 <a id="ExportRef.load"></a>
@@ -1028,9 +1029,10 @@ Start an export of the current run's results, wait for it,
 and save the zip to ``target_path``. See
 ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-Capped at 1 GiB per run server-side; for larger runs use
-``download_to_dir`` (no size limit, but slower — one body at a
-time, tunable via ``concurrency=``).
+The server caps the export size per run; for larger runs use
+``download_to_dir``, bound only by its own configurable limits
+(``max_files``, ``max_bytes_per_file``) and slower: one body at a
+time, tunable via ``concurrency=``.
 
 <a id="ScheduleControls"></a>
 
@@ -1235,10 +1237,18 @@ previous run to be terminal (``completed`` / ``stopped`` /
 #### add\_tasks
 
 ```python
-def add_tasks(body: AddTasksRequest | AddTasksDict) -> AddTasksResponse
+def add_tasks(body: AddTasksRequest | AddTasksDict,
+              *,
+              idempotency_key: str | None = None) -> AddTasksResponse
 ```
 
-``POST /jobs/{id}/tasks`` — append to the open initial run.
+``POST /jobs/{id}/tasks``: append to the open initial run.
+
+Pass ``idempotency_key`` to make the call safe to retry: a repeat
+with the same key and body replays the first answer instead of
+adding the tasks twice, and the transport then retries this POST
+on transient errors. Without a key every call appends its tasks
+and a failed call is not retried automatically.
 
 <a id="JobRef.runs"></a>
 
@@ -1449,6 +1459,17 @@ Results are NOT guaranteed to be in iteration order in either bulk
 flavour. The iteration of `iter_results` itself stays single-threaded
 so we never page faster than we drain.
 
+Rows with no body to download carry no `result_url`: failed tasks,
+`expired` rows whose result is past the visibility window, and rows not
+finished yet (`pending` / `processing`). The bulk helpers skip those
+instead of stopping part-way, and log one WARNING on the
+`zenrows.batch.download` logger with the counts per status. A
+`successful` row without a `result_url` is different: its body exists
+but the API could not sign a link for it. The helpers fetch that page
+once more, and if the link is still missing they raise
+`ResultURLUnavailable` rather than drop a result silently. The
+single-task helpers still raise `ValueError` for a row with no URL.
+
 `progress=True` installs a `rich.progress` bar if `rich` is
 importable; falls back to no-op if it isn't (so the SDK works in
 minimal envs without a hard dep).
@@ -1475,6 +1496,22 @@ One row's worth of downloaded content held in memory.
 #### DEFAULT\_MAX\_TOTAL\_BYTES\_IN\_MEMORY
 
 500 MiB
+
+<a id="ResultURLUnavailable"></a>
+
+## ResultURLUnavailable Objects
+
+```python
+class ResultURLUnavailable(ValueError)
+```
+
+Raised by a bulk download when `successful` rows still have no
+`result_url` after their results page was fetched a second time.
+The bodies exist; the API could not sign download links for them
+just now. Retry later, or fetch them one by one.
+
+Subclasses `ValueError`, which bulk downloads raised for a row with
+no `result_url` before, so existing `except ValueError` still works.
 
 <a id="DownloadLimitExceeded"></a>
 
@@ -1506,7 +1543,11 @@ def download_to_dir(
         max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE) -> int
 ```
 
-Stream every task's body into `target_dir`. Returns the count.
+Stream every task's body into `target_dir`. Returns the number of
+files written. Rows with no body (failed, `expired`, or not finished)
+are skipped and counted in a WARNING log record; a `successful` row
+still missing its `result_url` after one refetch raises
+`ResultURLUnavailable`.
 
 `concurrency` parallelises the body-fetch + write. With the
 default 1, behaviour is exactly serial. With N>1, up to N bodies
@@ -1562,6 +1603,9 @@ def download_to_memory(
 ```
 
 Load every (matching) task body into a list and return it.
+Rows with no body (failed, `expired`, or not finished) are skipped
+and counted in a WARNING log record; a `successful` row still missing
+its `result_url` after one refetch raises `ResultURLUnavailable`.
 
 Three independent caps that all raise `DownloadLimitExceeded`:
   - `max_count` — how many rows total
@@ -1830,6 +1874,53 @@ daily / weekly / monthly cadence.
 `"09:30"`). `cadence` is exactly one of `Daily()`, `Weekly(...)`,
 or `Monthly(...)`. `timezone` is mandatory (IANA name).
 
+# Webhook signatures
+
+Verify the signature on an incoming Batch webhook delivery.
+
+A signed delivery carries an `X-Signature` header shaped
+`t=<unix seconds>,v1=<hex digest>,kid=<key id>`. The digest is
+HMAC-SHA256 over the bytes `<t>.<raw request body>`, keyed with the
+signing secret. The API shows that secret once, base64-encoded, when you
+create or rotate a key; this helper decodes it for you.
+
+    from zenrows.batch import verify_webhook
+
+    ok = verify_webhook(
+        request.body,                        # raw bytes, before any JSON parsing
+        request.headers["X-Signature"],
+        {"kid_123": "q3Jk...base64...="},    # every key you may still receive
+    )
+
+Keep the previous key in `secrets` while a rotation is in progress:
+deliveries name the key they were signed with in `kid`.
+
+<a id="verify_webhook"></a>
+
+#### verify\_webhook
+
+```python
+def verify_webhook(raw_body: bytes | str,
+                   signature_header: str,
+                   secrets: Mapping[str, str],
+                   *,
+                   tolerance_seconds: float = DEFAULT_TOLERANCE_SECONDS,
+                   now: float | None = None) -> bool
+```
+
+Return True when `signature_header` is a valid signature of `raw_body`.
+
+`raw_body` must be the exact bytes received (a `str` is encoded as
+UTF-8). `secrets` maps key id (`kid`) to the base64 secret the API
+returned; a secret that doesn't decode to 32 bytes (including an
+empty one) never verifies. The header's `kid` picks the secret; an unknown `kid`, a
+malformed header or secret, a wrong digest, or a timestamp more than
+`tolerance_seconds` away from `now` (default: the current time) all
+return False. Pass `tolerance_seconds=0` to skip the timestamp check;
+a negative tolerance rejects every delivery. It never raises on bad
+input, including arguments of the wrong type: a delivery it can't
+read is rejected.
+
 # Errors
 
 RFC 7807 Problem JSON → friendly Python exceptions.
@@ -1985,6 +2076,11 @@ Clients must accept values not listed here.
 class TaskStatus(Enum)
 ```
 
+- `expired`: the task's result is past the visibility window
+  (14 days by default). The row has no `result_url` and
+  `/content` answers `410 result_expired`. A `successful`
+  filter still returns these rows.
+
 Clients must accept values not listed here.
 
 <a id="ResultType"></a>
@@ -2061,7 +2157,9 @@ assigned `task_id`.
 
 #### url
 
-Must be http(s). Other schemes rejected at submit.
+Must be http(s). Other schemes rejected at submit. The API
+limits the URL to 2,048 bytes once UTF-8 encoded
+(`url_too_long`).
 
 <a id="TaskInput.method"></a>
 
@@ -2144,11 +2242,11 @@ cost?" indicator, not for reconciliation.
 class TaskSpend(BaseModel)
 ```
 
-Per-task indicative spend with two roll-ups: `total`
+Deprecated: result rows never carry per-task spend, so this
+model is never populated. Kept so existing imports keep
+working. Per-task indicative spend with two roll-ups: `total`
 accumulates across every attempt (including retries),
-`last_attempt` carries just the most recent gateway call.
-On a task that succeeded on its first try the two are
-equal; on a retried task they diverge.
+`last_attempt` carries just the most recent attempt.
 
 <a id="RunStats"></a>
 
@@ -2834,7 +2932,7 @@ re-fetch the URL right before you download.
 
 Non-empty only when `status = failed`. Stable strings —
 e.g. `"results are larger than N gb"` when the combined
-results exceed the export byte cap (20 GiB).
+results exceed the export byte cap (a per-environment setting).
 
 <a id="Export.download_url"></a>
 
@@ -2949,9 +3047,11 @@ responses.
 
 #### result\_url
 
-24-hour presigned download URL for the result body, or a
-`/v1/jobs/<id>/runs/<run>/tasks/<tid>/content` URL you can
-fetch directly. Empty for non-successful tasks.
+Presigned download URL for the result body, valid for 2
+hours. Empty for non-successful and `expired` tasks. The
+body is also served by the separate
+`GET /v1/jobs/{job_id}/runs/{run_id}/tasks/{task_id}/content`
+endpoint, which needs your API key.
 
 <a id="TaskResult.error"></a>
 
@@ -2971,6 +3071,13 @@ never re-executed, and its `result_url` resolves to the
 source run's stored result. On chained retries,
 `source_run_id` chases back to the run that actually
 owns the result. Empty for normally-executed rows.
+
+<a id="TaskResult.spend"></a>
+
+#### spend
+
+Deprecated: result rows never carry per-task spend, so this
+is always empty. Read the run-level `stats.spend` instead.
 
 <a id="TaskResult.created_at"></a>
 
@@ -3153,7 +3260,7 @@ ignored otherwise.
 
 #### tasks
 
-Required for closed jobs (1–1000) unless `file_input_id`
+Required for closed jobs (1 to 100,000) unless `file_input_id`
 is provided. Optional for open jobs — may be empty if the
 caller will follow up with `addTasks`. Mutually exclusive
 with `file_input_id`.

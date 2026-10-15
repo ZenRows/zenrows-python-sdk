@@ -51,9 +51,10 @@ JS_AND_PROXY_CREDITS = 25
 AUTO_MIN_CREDITS = 1
 AUTO_MAX_CREDITS = 25
 
-# Param values arrive as str | bool | int. These spellings
-# count as "on" for the boolean flags.
-_TRUTHY = frozenset({"true", "1", "yes", "on"})
+# Param values arrive as str | bool | int. The API lowercases boolean
+# params and accepts only "true" / "false" (anything else, such as 1,
+# "1", "yes" or "on", is rejected with 400), so only JSON true or a
+# string equal to "true" ignoring case counts as "on".
 
 # What `Tier` keys can appear, in the order a breakdown should render.
 ParamValue = str | bool | int | dict[str, str]  # dict form: `custom_headers` map
@@ -170,14 +171,13 @@ class CostEstimate:
 
 
 def _truthy(value: ParamValue | None) -> bool:
-    """Coerce a scraper-param scalar to a boolean. Booleans pass
-    through; ints are nonzero-truthy; strings match the on-spellings."""
+    """Read a boolean scraper param the way the API does: JSON `True`,
+    or a string equal to `"true"` ignoring case. Every other value is
+    off (the API rejects non-boolean spellings at submit)."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, int):
-        return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in _TRUTHY
+        return value.lower() == "true"
     return False
 
 

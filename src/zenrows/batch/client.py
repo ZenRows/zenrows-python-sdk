@@ -253,7 +253,7 @@ class ZenRowsBatchClient:
         """Submit a one-shot scraping job (closed, all tasks upfront).
 
         Pass `urls` as either bare strings or inline dicts carrying
-        per-task `external_id` / `metadata` / `params`:
+        per-task `external_id` / `metadata` / `zenrows_params`:
 
             client.submit_regular(["https://a", "https://b"])
             client.submit_regular([
@@ -583,8 +583,7 @@ class ZenRowsBatchClient:
         waiter raise `WaiterError` on it instead.
 
         `progress=True` shows a tqdm bar with totals as they advance.
-        `None` inherits the client-level `progress` setting (which
-        itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
+        It is off by default.
         """
         return self._wait_for_run_raw(
             job_id,
@@ -721,8 +720,8 @@ class ZenRowsBatchClient:
 
         Failure modes: 404 if the job/run is missing or not yours.
         The worker fails the export (status=failed,
-        error="results are larger then 1 gb") if the pre-zip total
-        exceeds the server's 1 GiB cap.
+        error="results are larger than N gb") if the pre-zip total
+        exceeds the server's export size cap.
         """
         resp = self._post_export_start(job_id, run_id)
         return ExportRef(self, job_id, run_id, resp.export_id, start_response=resp)
@@ -750,7 +749,7 @@ class ZenRowsBatchClient:
         check `.status` and (on `completed`) `.download_url`.
 
         `failed` is NOT raised; the caller decides whether
-        `error="results are larger then 1 gb"` is fatal or expected.
+        `error="results are larger than N gb"` is fatal or expected.
         """
         return self._wait_for_export_raw(
             job_id,
@@ -835,10 +834,17 @@ class ZenRowsBatchClient:
             Job,
         )
 
-    def _post_tasks(self, job_id: str, body: AddTasksRequest | AddTasksDict) -> AddTasksResponse:
+    def _post_tasks(
+        self,
+        job_id: str,
+        body: AddTasksRequest | AddTasksDict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> AddTasksResponse:
         body = _as_model(body, AddTasksRequest)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return _parse(
-            self._t.request_json("POST", f"/jobs/{job_id}/tasks", body=body),
+            self._t.request_json("POST", f"/jobs/{job_id}/tasks", body=body, headers=headers),
             AddTasksResponse,
         )
 
@@ -930,12 +936,13 @@ class ZenRowsBatchClient:
         Raises `WaiterTimeout` if the export doesn't reach a terminal
         state within `wait_timeout`. Raises `BatchAPIError` with the
         server's error message on `status=failed` (e.g.
-        `"results are larger then 1 gb"`). Returns the `Path` written.
+        `"results are larger than N gb"`). Returns the `Path` written.
 
-        The server-side export is capped at 1 GiB per run. For larger
+        The server-side export has a size cap per run. For larger
         runs (or one file per task), use `download_to_dir` instead: it
-        fetches each body client-side with no size limit, at the cost
-        of being slower (one body at a time, tunable via `concurrency=`).
+        fetches each body client-side, bound only by its own configurable
+        limits (`max_files`, `max_bytes_per_file`), at the cost of being
+        slower (one body at a time, tunable via `concurrency=`).
         """
         export = self.start_results_export(job_id, run_id)
         final = self.wait_for_export(

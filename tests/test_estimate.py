@@ -35,13 +35,18 @@ def test_cost_for_params_rate_card(params, tier, lo, hi):
     assert tc.exact == (lo == hi)
 
 
-@pytest.mark.parametrize("value", [True, "true", "True", " TRUE ", 1, "1", "yes", "on"])
-def test_truthy_spellings_turn_on_a_flag(value):
+@pytest.mark.parametrize("value", [True, "true", "True", "TRUE"])
+def test_true_spellings_turn_on_a_flag(value):
     assert cost_for_params({"js_render": value}).tier is Tier.JS
 
 
-@pytest.mark.parametrize("value", [False, "false", "0", 0, "", "no"])
-def test_falsy_spellings_keep_base(value):
+@pytest.mark.parametrize(
+    "value",
+    # The API accepts only true / "true" (any case) as on; 1, "1", "yes",
+    # "on" and padded strings are rejected at submit, so they never cost more.
+    [False, "false", "0", 0, "", "no", 1, "1", "yes", "on", " TRUE "],
+)
+def test_other_spellings_keep_base(value):
     assert cost_for_params({"js_render": value}).tier is Tier.BASE
 
 

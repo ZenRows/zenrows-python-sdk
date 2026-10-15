@@ -15,7 +15,7 @@ Completion is surfaced via waiters (`job.wait()` / `run.wait()`) and
 webhooks — poll or get notified; there's no callback to wire up.
 """
 
-from zenrows.batch._download import DownloadedResult, DownloadLimitExceeded
+from zenrows.batch._download import DownloadedResult, DownloadLimitExceeded, ResultURLUnavailable
 from zenrows.batch._estimate import (
     CostEstimate,
     CostLine,
@@ -74,6 +74,7 @@ from zenrows.batch.models import (
     TestWebhookResponse,
     WebhookConfig,
 )
+from zenrows.batch.webhooks import verify_webhook
 
 __all__ = [
     "TERMINAL_RUN_STATUSES",
@@ -106,6 +107,7 @@ __all__ = [
     "Monthly",
     "ProblemDetail",
     "Rate",
+    "ResultURLUnavailable",
     "Run",
     "RunHandle",
     "RunRef",
@@ -129,4 +131,5 @@ __all__ = [
     "WebhookDict",
     "Weekly",
     "ZenRowsBatchClient",
+    "verify_webhook",
 ]

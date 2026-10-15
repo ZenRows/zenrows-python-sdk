@@ -25,6 +25,17 @@ Results are NOT guaranteed to be in iteration order in either bulk
 flavour. The iteration of `iter_results` itself stays single-threaded
 so we never page faster than we drain.
 
+Rows with no body to download carry no `result_url`: failed tasks,
+`expired` rows whose result is past the visibility window, and rows not
+finished yet (`pending` / `processing`). The bulk helpers skip those
+instead of stopping part-way, and log one WARNING on the
+`zenrows.batch.download` logger with the counts per status. A
+`successful` row without a `result_url` is different: its body exists
+but the API could not sign a link for it. The helpers fetch that page
+once more, and if the link is still missing they raise
+`ResultURLUnavailable` rather than drop a result silently. The
+single-task helpers still raise `ValueError` for a row with no URL.
+
 `progress=True` installs a `rich.progress` bar if `rich` is
 importable; falls back to no-op if it isn't (so the SDK works in
 minimal envs without a hard dep).
@@ -32,6 +43,7 @@ minimal envs without a hard dep).
 
 import os
 import threading
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, nullcontext
@@ -41,8 +53,16 @@ from typing import IO, Any, Protocol
 
 import httpx
 
+from zenrows.batch._logging import logger
 from zenrows.batch.errors import BatchAPIError
 from zenrows.batch.models import TaskResult, TaskStatus
+
+_log = logger("download")
+
+
+class _ResultsPage(Protocol):
+    results: list[TaskResult]
+    next_cursor: str | None
 
 
 class _BodyFetcher(Protocol):
@@ -54,13 +74,14 @@ class _BodyFetcher(Protocol):
     the whole client.
     """
 
-    def _iter_results_raw(
+    def list_results(
         self,
         job_id: str,
         *,
         run_id: str | None = ...,
         status: str | None = ...,
-    ) -> Iterator[TaskResult]: ...
+        cursor: str | None = ...,
+    ) -> _ResultsPage: ...
 
 
 @dataclass(slots=True)
@@ -79,6 +100,24 @@ DEFAULT_MAX_FILES = 100_000
 DEFAULT_MAX_BYTES_PER_FILE = 50 * 1024 * 1024  # 50 MiB
 DEFAULT_MAX_COUNT_IN_MEMORY = 10_000
 DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY = 500 * 1024 * 1024  # 500 MiB
+
+
+class ResultURLUnavailable(ValueError):
+    """Raised by a bulk download when `successful` rows still have no
+    `result_url` after their results page was fetched a second time.
+    The bodies exist; the API could not sign download links for them
+    just now. Retry later, or fetch them one by one.
+
+    Subclasses `ValueError`, which bulk downloads raised for a row with
+    no `result_url` before, so existing `except ValueError` still works."""
+
+    def __init__(self, task_ids: list[str]):
+        self.task_ids = task_ids
+        shown = ", ".join(task_ids[:5]) + (", ..." if len(task_ids) > 5 else "")
+        super().__init__(
+            f"download: {len(task_ids)} successful result(s) have no result_url "
+            f"after a retry: {shown}"
+        )
 
 
 class DownloadLimitExceeded(RuntimeError):
@@ -108,7 +147,11 @@ def download_to_dir(
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
 ) -> int:
-    """Stream every task's body into `target_dir`. Returns the count.
+    """Stream every task's body into `target_dir`. Returns the number of
+    files written. Rows with no body (failed, `expired`, or not finished)
+    are skipped and counted in a WARNING log record; a `successful` row
+    still missing its `result_url` after one refetch raises
+    `ResultURLUnavailable`.
 
     `concurrency` parallelises the body-fetch + write. With the
     default 1, behaviour is exactly serial. With N>1, up to N bodies
@@ -285,6 +328,9 @@ def download_to_memory(
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
 ) -> list[DownloadedResult]:
     """Load every (matching) task body into a list and return it.
+    Rows with no body (failed, `expired`, or not finished) are skipped
+    and counted in a WARNING log record; a `successful` row still missing
+    its `result_url` after one refetch raises `ResultURLUnavailable`.
 
     Three independent caps that all raise `DownloadLimitExceeded`:
       - `max_count` — how many rows total
@@ -353,27 +399,77 @@ def _run_bulk(
     Cap checking is done *here* rather than in `per_row` so the
     count is authoritative even when the closures run out of order.
     """
-    rows = client._iter_results_raw(job_id, run_id=run_id, status=status)
+    skipped: Counter[str] = Counter()  # status -> rows with no body to fetch
 
-    with _maybe_progress(progress, progress_description) as advance:
-        if concurrency <= 1:
-            written = 0
+    def downloadable() -> Iterator[TaskResult]:
+        cursor: str | None = None
+        while True:
+            page = client.list_results(job_id, run_id=run_id, status=status, cursor=cursor)
+            rows = list(page.results)
+            if any(_unsigned_success(r) for r in rows):
+                # The body exists but the link could not be signed on
+                # this read: ask for the same page once more.
+                again = {
+                    r.task_id: r
+                    for r in client.list_results(
+                        job_id, run_id=run_id, status=status, cursor=cursor
+                    ).results
+                }
+                rows = [again.get(r.task_id, r) if _unsigned_success(r) else r for r in rows]
+                missing = [r.task_id for r in rows if _unsigned_success(r)]
+                if missing:
+                    raise ResultURLUnavailable(missing)
             for row in rows:
-                if written >= max_rows:
-                    raise DownloadLimitExceeded(max_rows_limit_name, max_rows, written + 1)
-                per_row(row)
-                written += 1
-                advance(1)
-            return written
+                if row.result_url:
+                    yield row
+                else:
+                    # Failed, `expired`, or not finished yet: no body.
+                    skipped[_status_name(row)] += 1
+            cursor = page.next_cursor
+            if not cursor:
+                return
 
-        return _run_parallel(
-            rows,
-            per_row=per_row,
-            concurrency=concurrency,
-            max_rows=max_rows,
-            max_rows_limit_name=max_rows_limit_name,
-            advance=advance,
-        )
+    rows = downloadable()
+    try:
+        with _maybe_progress(progress, progress_description) as advance:
+            if concurrency <= 1:
+                written = 0
+                for row in rows:
+                    if written >= max_rows:
+                        raise DownloadLimitExceeded(max_rows_limit_name, max_rows, written + 1)
+                    per_row(row)
+                    written += 1
+                    advance(1)
+                return written
+
+            return _run_parallel(
+                rows,
+                per_row=per_row,
+                concurrency=concurrency,
+                max_rows=max_rows,
+                max_rows_limit_name=max_rows_limit_name,
+                advance=advance,
+            )
+    finally:
+        total = sum(skipped.values())
+        if total:
+            detail = ", ".join(f"{n} {name}" for name, n in sorted(skipped.items()))
+            _log.warning(
+                "skipped %d result(s) with no downloadable body (%s)",
+                total,
+                detail,
+                extra={"job_id": job_id, "run_id": run_id, "skipped": dict(skipped)},
+            )
+
+
+def _status_name(row: TaskResult) -> str:
+    return getattr(row.status, "value", None) or str(row.status)
+
+
+def _unsigned_success(row: TaskResult) -> bool:
+    """A `successful` row with no `result_url`: the body exists but the
+    API returned no signed link for it."""
+    return row.status is TaskStatus.SUCCESSFUL and not row.result_url
 
 
 def _run_parallel(
@@ -464,6 +560,7 @@ __all__ = [
     "DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY",
     "DownloadLimitExceeded",
     "DownloadedResult",
+    "ResultURLUnavailable",
     "download_to_dir",
     "download_to_memory",
 ]
