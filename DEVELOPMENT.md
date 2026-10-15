@@ -151,9 +151,9 @@ To publish an existing tag again, run the Release workflow by hand from
 
 ### If the checks fail after the release PR is merged
 
-CI runs on the release PR: the release workflow starts it each time the PR
-updates. The release run checks again after the merge. If those checks
-fail, `main` already has the new version, but there is no tag, and the
+The release PR runs CI like any other PR. After you merge it, the release
+run checks the code again before it tags and publishes. If that check
+fails, `main` already has the new version, but there is no tag, and the
 merged release PR keeps the `autorelease: pending` label, which blocks the
 next release PR. To recover:
 
