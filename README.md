@@ -68,7 +68,7 @@ client = ZenRowsClient("YOUR-API-KEY", retries=1)
 url = "https://www.zenrows.com/"
 
 response = client.fetch(url, params={
-    # Our algorithm allows to automatically extract content from any website
+    # Deprecated: use client.extract() for structured data instead
     "autoparse": False,
 
     # CSS Selectors for data extraction (i.e. {"links":"a @href"} to get href attributes from links)
@@ -203,6 +203,14 @@ print(response.json())
 ```
 
 `extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
+
+Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means the domain isn't prepared for Extract yet: prepare it with `POST /v1/extract/prepared-domains`, or pass `fallback_to_autoparse=True` to retry with deprecated autoparse. The legacy `402` with `code: "AUTH010"` is handled the same way. By default `extract()` returns both error responses to you as is, without a second request.
+
+```python
+# Opt in to one retry with the deprecated autoparse on REQS007 / AUTH010.
+# The retry is a second, separately charged request.
+response = client.extract(url, fallback_to_autoparse=True)
+```
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
 

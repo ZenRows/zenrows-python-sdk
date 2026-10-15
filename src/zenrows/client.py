@@ -58,7 +58,8 @@ def is_no_data_extracted(response: requests.Response) -> bool:
 
 # Extract answers these when it can't serve the target domain: 403 REQS007
 # (domain not prepared yet) or the legacy 402 AUTH010 (domain not enabled).
-# extract(mode="auto") retries both once with Autoparse.
+# extract(mode="auto", fallback_to_autoparse=True) retries both once with the
+# deprecated Autoparse; by default they are returned to the caller as is.
 _EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
 
 
@@ -168,7 +169,7 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
-        fallback_to_autoparse: bool = True,
+        fallback_to_autoparse: bool = False,
         adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
@@ -177,13 +178,18 @@ class ZenRowsClient:
         or "standard". Thin wrapper over `fetch()` with the `extract` param set:
         no separate endpoint or auth.
 
-        Extract works on any domain once Zenrows has prepared it, with any
-        active API key. A domain that isn't prepared yet answers 403 with
-        `code: "REQS007"` (prepare it with `POST /v1/extract/prepared-domains`);
-        the legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
-        On either, `mode="auto"` retries once with `autoparse=True` instead of
-        returning the error response. Pass `fallback_to_autoparse=False` to
-        disable that and get the raw error response back.
+        Extract works on any prepared domain (you can prepare one yourself
+        with `POST /v1/extract/prepared-domains`), with any active API key.
+        A 403 with `code: "REQS007"` means the domain isn't prepared for
+        Extract yet: prepare it with `POST /v1/extract/prepared-domains`, or
+        pass `fallback_to_autoparse=True` to retry with deprecated autoparse.
+        The legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
+        By default both error responses are returned to you as is.
+
+        `fallback_to_autoparse=True` (opt-in, default False) makes
+        `mode="auto"` retry once with `autoparse=True` on either code instead
+        of returning the error response. Autoparse is deprecated, and the
+        retry is a second, separately charged request.
 
         A 422 with `code: "no_data_extracted"` means Extract knows this kind
         of page but found no data on it. It is not charged and is never
@@ -191,7 +197,8 @@ class ZenRowsClient:
 
         `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
-        `mode` argument) on both the extract attempt and the Autoparse fallback,
+        `mode` argument) on the extract attempt and on the Autoparse fallback
+        when `fallback_to_autoparse=True`,
         so a target needing `js_render`/`premium_proxy` gets escalated
         automatically instead of failing with REQS002. It is skipped when
         `params` sets `js_render` or `premium_proxy` (the API rejects either
@@ -258,13 +265,13 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
-        fallback_to_autoparse: bool = True,
+        fallback_to_autoparse: bool = False,
         adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        REQS007 / AUTH010 -> Autoparse fallback behavior,
-        `fallback_to_autoparse`, and `adaptive_stealth`."""
+        REQS007 / AUTH010 handling, the opt-in `fallback_to_autoparse`, and
+        `adaptive_stealth`."""
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         _with_adaptive_stealth(final_params, adaptive_stealth)

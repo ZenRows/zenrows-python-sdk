@@ -126,35 +126,47 @@ class TestFetchExtractErrorHandling(TestCase):
 class TestExtractAutoparseFallback(TestCase):
     """`extract(mode="auto")`: 403 REQS007 means the target domain isn't
     prepared for Extract yet, and the legacy 402 AUTH010 that it isn't
-    enabled. On either, by default this retries once with Autoparse instead
-    of returning the error - same behavior as the CLI's extract adapter."""
+    enabled. By default both are returned as is, without a second request.
+    With `fallback_to_autoparse=True` the client retries exactly once with
+    the deprecated Autoparse."""
 
     def setUp(self):
         self.client = ZenRowsClient(apikey)
 
     @mock.patch.object(Session, "request")
-    def test_falls_back_to_autoparse_on_auth010(self, mock_request):
-        mock_request.side_effect = [
-            _fake_response(402, b'{"code": "AUTH010", "title": "Domain not enabled"}'),
-            _fake_response(200, b'[{"found": "via autoparse"}]'),
-        ]
+    def test_reqs007_is_returned_without_fallback_by_default(self, mock_request):
+        mock_request.return_value = _fake_response(
+            403, b'{"code": "REQS007", "title": "Domain not prepared"}'
+        )
 
         response = self.client.extract(url)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(mock_request.call_count, 2)
-        _, fallback_kwargs = mock_request.call_args
-        self.assertTrue(fallback_kwargs["params"].get("autoparse"))
-        self.assertNotIn("extract", fallback_kwargs["params"])
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(mock_request.call_count, 1)
+        _, kwargs = mock_request.call_args
+        self.assertNotIn("autoparse", kwargs["params"])
 
     @mock.patch.object(Session, "request")
-    def test_falls_back_to_autoparse_on_reqs007(self, mock_request):
+    def test_auth010_is_returned_without_fallback_by_default(self, mock_request):
+        mock_request.return_value = _fake_response(
+            402, b'{"code": "AUTH010", "title": "Domain not enabled"}'
+        )
+
+        response = self.client.extract(url)
+
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(mock_request.call_count, 1)
+        _, kwargs = mock_request.call_args
+        self.assertNotIn("autoparse", kwargs["params"])
+
+    @mock.patch.object(Session, "request")
+    def test_opt_in_falls_back_to_autoparse_on_reqs007(self, mock_request):
         mock_request.side_effect = [
             _fake_response(403, b'{"code": "REQS007", "title": "Domain not prepared"}'),
             _fake_response(200, b'[{"found": "via autoparse"}]'),
         ]
 
-        response = self.client.extract(url)
+        response = self.client.extract(url, fallback_to_autoparse=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_request.call_count, 2)
@@ -163,70 +175,68 @@ class TestExtractAutoparseFallback(TestCase):
         self.assertNotIn("extract", fallback_kwargs["params"])
 
     @mock.patch.object(Session, "request")
-    def test_reqs007_fallback_disabled_returns_error_response(self, mock_request):
-        mock_request.return_value = _fake_response(403, b'{"code": "REQS007"}')
+    def test_opt_in_falls_back_to_autoparse_on_auth010(self, mock_request):
+        mock_request.side_effect = [
+            _fake_response(402, b'{"code": "AUTH010", "title": "Domain not enabled"}'),
+            _fake_response(200, b'[{"found": "via autoparse"}]'),
+        ]
 
-        response = self.client.extract(url, fallback_to_autoparse=False)
+        response = self.client.extract(url, fallback_to_autoparse=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_request.call_count, 2)
+        _, fallback_kwargs = mock_request.call_args
+        self.assertTrue(fallback_kwargs["params"].get("autoparse"))
+        self.assertNotIn("extract", fallback_kwargs["params"])
+
+    @mock.patch.object(Session, "request")
+    def test_opt_in_retries_autoparse_only_once(self, mock_request):
+        """A fallback that fails again is returned, not retried a second time."""
+        mock_request.side_effect = [
+            _fake_response(403, b'{"code": "REQS007"}'),
+            _fake_response(403, b'{"code": "REQS007"}'),
+            _fake_response(200, b"{}"),
+        ]
+
+        response = self.client.extract(url, fallback_to_autoparse=True)
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(mock_request.call_count, 1)
+        self.assertEqual(mock_request.call_count, 2)
 
     @mock.patch.object(Session, "request")
-    def test_403_without_reqs007_does_not_fall_back(self, mock_request):
-        """A Zenrows auth 403 must not be mistaken for a domain that isn't
-        prepared yet."""
-        mock_request.return_value = _fake_response(
-            403, b'{"code": "AUTH002", "title": "Invalid API key"}'
-        )
+    def test_other_4xx_never_fall_back(self, mock_request):
+        """Neither an auth 403, a credits-exhausted 402, nor REQS007 / AUTH010
+        on the wrong status is mistaken for a domain that isn't prepared,
+        even with the fallback on."""
+        cases = [
+            (403, b'{"code": "AUTH002", "title": "Invalid API key"}'),
+            (402, b'{"code": "AUTH004", "title": "No credit available"}'),
+            (400, b'{"code": "REQS007"}'),
+            (400, b'{"code": "AUTH010"}'),
+            (404, b"{}"),
+        ]
+        for status, body in cases:
+            for fallback in (False, True):
+                with self.subTest(status=status, body=body, fallback=fallback):
+                    mock_request.reset_mock()
+                    mock_request.return_value = _fake_response(status, body)
 
-        response = self.client.extract(url)
+                    response = self.client.extract(url, fallback_to_autoparse=fallback)
 
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(mock_request.call_count, 1)
-
-    @mock.patch.object(Session, "request")
-    def test_code_on_the_wrong_status_does_not_fall_back(self, mock_request):
-        """REQS007 is only the not-prepared signal on a 403."""
-        mock_request.return_value = _fake_response(400, b'{"code": "REQS007"}')
-
-        response = self.client.extract(url)
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(mock_request.call_count, 1)
-
-    @mock.patch.object(Session, "request")
-    def test_fallback_disabled_returns_error_response(self, mock_request):
-        mock_request.return_value = _fake_response(402, b'{"code": "AUTH010"}')
-
-        response = self.client.extract(url, fallback_to_autoparse=False)
-
-        self.assertEqual(response.status_code, 402)
-        self.assertEqual(mock_request.call_count, 1)
-
-    @mock.patch.object(Session, "request")
-    def test_402_without_auth010_does_not_fall_back(self, mock_request):
-        """A real credits-exhausted 402 (e.g. AUTH004) must not be mistaken
-        for the domain-not-enabled error."""
-        mock_request.return_value = _fake_response(
-            402, b'{"code": "AUTH004", "title": "No credit available"}'
-        )
-
-        response = self.client.extract(url)
-
-        self.assertEqual(response.status_code, 402)
-        self.assertEqual(mock_request.call_count, 1)
+                    self.assertEqual(response.status_code, status)
+                    self.assertEqual(mock_request.call_count, 1)
 
     @mock.patch.object(Session, "request")
     def test_no_fallback_for_non_auto_mode(self, mock_request):
         """Neither code triggers a fallback for native/standard modes -
-        only "auto" takes the fallback path."""
+        only "auto" takes the fallback path, even when it is turned on."""
         mock_request.side_effect = [
             _fake_response(402, b'{"code": "AUTH010"}'),
             _fake_response(403, b'{"code": "REQS007"}'),
         ]
 
-        first = self.client.extract(url, mode="native")
-        second = self.client.extract(url, mode="standard")
+        first = self.client.extract(url, mode="native", fallback_to_autoparse=True)
+        second = self.client.extract(url, mode="standard", fallback_to_autoparse=True)
 
         self.assertEqual(first.status_code, 402)
         self.assertEqual(second.status_code, 403)
@@ -240,7 +250,7 @@ class TestExtractAutoparseFallback(TestCase):
         ]
         caller_params = {"js_render": True}
 
-        self.client.extract(url, params=caller_params)
+        self.client.extract(url, params=caller_params, fallback_to_autoparse=True)
 
         self.assertEqual(caller_params, {"js_render": True})
 
@@ -278,7 +288,7 @@ class TestExtractAdaptiveStealth(TestCase):
             _fake_response(200, b"{}"),
         ]
 
-        self.client.extract(url)
+        self.client.extract(url, fallback_to_autoparse=True)
 
         _, fallback_kwargs = mock_request.call_args
         self.assertEqual(fallback_kwargs["params"]["mode"], "auto")
@@ -329,7 +339,7 @@ class TestExtractAdaptiveStealth(TestCase):
             _fake_response(200, b"{}"),
         ]
 
-        self.client.extract(url, params={"premium_proxy": True})
+        self.client.extract(url, params={"premium_proxy": True}, fallback_to_autoparse=True)
 
         first_kwargs = mock_request.call_args_list[0].kwargs
         _, fallback_kwargs = mock_request.call_args
@@ -339,19 +349,34 @@ class TestExtractAdaptiveStealth(TestCase):
 
 
 class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):
-    """Async counterpart - same REQS007 / AUTH010 -> Autoparse behavior."""
+    """Async counterpart - same REQS007 / AUTH010 handling: returned as is by
+    default, one Autoparse retry when `fallback_to_autoparse=True`."""
 
     def setUp(self):
         self.client = ZenRowsClient(apikey, concurrency=2)
 
     @mock.patch.object(Session, "request")
-    async def test_falls_back_to_autoparse_on_auth010(self, mock_request):
+    async def test_reqs007_and_auth010_are_returned_without_fallback_by_default(self, mock_request):
+        mock_request.side_effect = [
+            _fake_response(403, b'{"code": "REQS007"}'),
+            _fake_response(402, b'{"code": "AUTH010"}'),
+        ]
+
+        first = await self.client.extract_async(url)
+        second = await self.client.extract_async(url)
+
+        self.assertEqual(first.status_code, 403)
+        self.assertEqual(second.status_code, 402)
+        self.assertEqual(mock_request.call_count, 2)
+
+    @mock.patch.object(Session, "request")
+    async def test_opt_in_falls_back_to_autoparse_on_auth010(self, mock_request):
         mock_request.side_effect = [
             _fake_response(402, b'{"code": "AUTH010"}'),
             _fake_response(200, b'[{"found": "via autoparse"}]'),
         ]
 
-        response = await self.client.extract_async(url)
+        response = await self.client.extract_async(url, fallback_to_autoparse=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_request.call_count, 2)
@@ -363,7 +388,7 @@ class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):
             _fake_response(200, b"{}"),
         ]
 
-        await self.client.extract_async(url, params={"js_render": True})
+        await self.client.extract_async(url, params={"js_render": True}, fallback_to_autoparse=True)
 
         first_kwargs = mock_request.call_args_list[0].kwargs
         _, fallback_kwargs = mock_request.call_args
@@ -371,13 +396,13 @@ class TestExtractAsyncAutoparseFallback(IsolatedAsyncioTestCase):
         self.assertNotIn("mode", fallback_kwargs["params"])
 
     @mock.patch.object(Session, "request")
-    async def test_falls_back_to_autoparse_on_reqs007(self, mock_request):
+    async def test_opt_in_falls_back_to_autoparse_on_reqs007(self, mock_request):
         mock_request.side_effect = [
             _fake_response(403, b'{"code": "REQS007"}'),
             _fake_response(200, b'[{"found": "via autoparse"}]'),
         ]
 
-        response = await self.client.extract_async(url)
+        response = await self.client.extract_async(url, fallback_to_autoparse=True)
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_request.call_count, 2)
