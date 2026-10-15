@@ -39,7 +39,10 @@ def main() -> None:
             case "subscription_inactive":
                 # The key is valid; the subscription is past due, unpaid,
                 # incomplete or paused. Re-entering the key won't help.
-                print("subscription not active — fix it at app.zenrows.com/billing")
+                print(
+                    "subscription not active — fix it at app.zenrows.com/billing"
+                    " (or in Azure Marketplace if you subscribed there)"
+                )
             case "payment_required":
                 print("out of credits — top up at zenrows.com")
             case _:
