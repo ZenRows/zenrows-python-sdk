@@ -32,7 +32,9 @@ class CrawlStatus(Enum):
 class StopReason(Enum):
     """What ended the crawl before nothing was left to open: a limit
     (`max_items` / `max_pages`, with `completed`) or the caller (`user`,
-    with `stopped`)."""
+    with `stopped`). Absent on a crawl that stopped because the account
+    ran out of credits or the API key hit a credit cap: that one carries
+    `error` instead."""
 
     MAX_ITEMS = "max_items"
     MAX_PAGES = "max_pages"
@@ -74,7 +76,11 @@ class DiscoveryStrategy(Enum):
 
 
 class CrawlErrorCode(Enum):
-    """Why a crawl failed (`Crawl.error.code`)."""
+    """Why a crawl failed, or why it stopped on credits (`Crawl.error.code`).
+
+    `insufficient_credits` and `api_key_cap_reached` come with
+    `status` `stopped`: the pages fetched before that stay readable.
+    The other codes come with `failed`."""
 
     INSUFFICIENT_CREDITS = "insufficient_credits"
     API_KEY_CAP_REACHED = "api_key_cap_reached"
@@ -87,8 +93,10 @@ class CrawlErrorCode(Enum):
 
 
 class RunError(BaseModel):
-    """Why a crawl failed. Present only when `status` is `failed`; part
-    of the crawl, not an error response."""
+    """Why a crawl failed, or why it stopped because the account ran out
+    of credits or the API key hit a credit cap. Present when `status` is
+    `failed`, and when it is `stopped` with `code` `insufficient_credits`
+    or `api_key_cap_reached`; part of the crawl, not an error response."""
 
     code: CrawlErrorCode
     detail: str
