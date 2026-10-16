@@ -174,16 +174,14 @@ def submit_scheduled(schedule: Schedule | JobScheduleDict,
                      name: str | None = None,
                      metadata: dict[str, str] | None = None,
                      webhook: WebhookDict | None = None,
-                     idempotency_key: str | None = None,
-                     wait_for_ingest: bool = False) -> JobRef
+                     idempotency_key: str | None = None) -> JobRef
 ```
 
 Submit a scheduled job.
 
 Creating a scheduled job starts no run (the first fire creates
-Run 1), so there is nothing to ingest yet and
-`wait_for_ingest=True` returns at once. It is accepted for
-parity with `submit_job`.
+Run 1), so there is nothing to ingest and no `wait_for_ingest`
+option.
 
 `schedule` is one of the typed builders (`At`, `Rate`,
 `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -1461,11 +1459,16 @@ finished writing task rows.
 Large submissions return ``202 Accepted`` and stream task rows
 into storage off the request path; until that finishes,
 results pages may be partial and ``add_tasks`` on an open job
-is rejected with 409. This polls ``GET /jobs/{id}`` until
-``latest_run.ingest_status`` leaves ``pending`` (also satisfied
-by a terminal run — a mid-ingest stop flips the field to
-``done``). Runs that never ingested asynchronously (any 201
-submission) are done on the first poll.
+is rejected with 409. This polls until the run's
+``ingest_status`` is no longer ``pending``. On a ref from a
+``submit_*`` call it polls the run that submit returned
+(``GET /jobs/{id}/runs/{run_id}``), so a replayed submit never
+follows a newer run; otherwise it polls the job's latest run.
+The run status does not end the wait: a run stopped mid-ingest
+is terminal at once but keeps ``ingest_status: pending`` until
+the API has settled its rows and cut ``stats.total`` to match.
+Runs that never ingested asynchronously (any 201 submission)
+are done on the first poll.
 
 Raises ``WaiterTimeout`` after ``timeout`` seconds. Returns the
 fresh loaded handle, so chains like

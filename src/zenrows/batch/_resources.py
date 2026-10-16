@@ -930,26 +930,39 @@ class JobRef:
         Large submissions return ``202 Accepted`` and stream task rows
         into storage off the request path; until that finishes,
         results pages may be partial and ``add_tasks`` on an open job
-        is rejected with 409. This polls ``GET /jobs/{id}`` until
-        ``latest_run.ingest_status`` leaves ``pending`` (also satisfied
-        by a terminal run — a mid-ingest stop flips the field to
-        ``done``). Runs that never ingested asynchronously (any 201
-        submission) are done on the first poll.
+        is rejected with 409. This polls until the run's
+        ``ingest_status`` is no longer ``pending``. On a ref from a
+        ``submit_*`` call it polls the run that submit returned
+        (``GET /jobs/{id}/runs/{run_id}``), so a replayed submit never
+        follows a newer run; otherwise it polls the job's latest run.
+        The run status does not end the wait: a run stopped mid-ingest
+        is terminal at once but keeps ``ingest_status: pending`` until
+        the API has settled its rows and cut ``stats.total`` to match.
+        Runs that never ingested asynchronously (any 201 submission)
+        are done on the first poll.
 
         Raises ``WaiterTimeout`` after ``timeout`` seconds. Returns the
         fresh loaded handle, so chains like
         ``job.wait_for_ingest().add_tasks(...)`` work. Or opt in at
         submit time via ``submit_job(..., wait_for_ingest=True)``."""
-        return JobHandle(
-            self._client,
-            self.job_id,
-            self._client._wait_for_ingest_raw(
+        submitted = self.submit_response.latest_run if self.submit_response else None
+        if submitted is not None:
+            self._client._wait_for_run_ingest_raw(
+                self.job_id,
+                submitted.run_id,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                max_poll_interval=max_poll_interval,
+            )
+            data = self._client._get_job_data(self.job_id)
+        else:
+            data = self._client._wait_for_ingest_raw(
                 self.job_id,
                 timeout=timeout,
                 poll_interval=poll_interval,
                 max_poll_interval=max_poll_interval,
-            ),
-        )
+            )
+        return JobHandle(self._client, self.job_id, data, submit_response=self.submit_response)
 
 
 class JobHandle(JobRef):

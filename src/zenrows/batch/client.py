@@ -332,14 +332,12 @@ class ZenRowsBatchClient:
         metadata: dict[str, str] | None = None,
         webhook: WebhookDict | None = None,
         idempotency_key: str | None = None,
-        wait_for_ingest: bool = False,
     ) -> JobRef:
         """Submit a scheduled job.
 
         Creating a scheduled job starts no run (the first fire creates
-        Run 1), so there is nothing to ingest yet and
-        `wait_for_ingest=True` returns at once. It is accepted for
-        parity with `submit_job`.
+        Run 1), so there is nothing to ingest and no `wait_for_ingest`
+        option.
 
         `schedule` is one of the typed builders (`At`, `Rate`,
         `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -394,9 +392,7 @@ class ZenRowsBatchClient:
             metadata=metadata,
             webhook=webhook,
         )
-        return self.submit_job(
-            body, idempotency_key=idempotency_key, wait_for_ingest=wait_for_ingest
-        )
+        return self.submit_job(body, idempotency_key=idempotency_key)
 
     def get_job(self, job_id: str) -> JobHandle:
         """`GET /jobs/{job_id}` — returns a loaded `JobHandle` with
@@ -1091,17 +1087,18 @@ class ZenRowsBatchClient:
     ) -> Job:
         """Poll `GET /jobs/{id}` until the latest run's async-carrier
         ingestion is no longer `pending`. Done means: `ingest_status`
-        is `done` or absent (the run never ingested asynchronously),
-        the run is terminal (a mid-ingest stop flips the field to
-        `done` — SPEC §3.1), or there is no run yet (nothing is
-        ingesting). Returns the final `Job` snapshot."""
+        is `done` or absent (the run never ingested asynchronously), or
+        there is no run yet (nothing is ingesting). A terminal status
+        is not enough: a run stopped mid-ingest keeps `pending` until
+        the ingest worker settles its rows and marks it done. Returns
+        the final `Job` snapshot."""
 
         def fetch() -> Job:
             return self._get_job_data(job_id)
 
         def is_done(job: Job) -> bool:
             run = job.latest_run
-            if run is None or run.status.value in TERMINAL_RUN_STATUSES:
+            if run is None:
                 return True
             return run.ingest_status is not IngestStatus.PENDING
 

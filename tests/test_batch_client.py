@@ -690,7 +690,7 @@ def _ingest_job_json(ingest_status: str | None) -> dict:
 @respx.mock
 def test_submit_wait_for_ingest_polls_202_until_done(client: ZenRowsBatchClient):
     """A 202 submit body carries `ingest_status: pending`; the flag
-    polls GET /jobs/{id} until it leaves `pending`."""
+    polls the submitted run until it leaves `pending`, then reads the job."""
     respx.post(f"{BASE_URL}/jobs").mock(
         return_value=Response(
             202,
@@ -702,12 +702,16 @@ def test_submit_wait_for_ingest_polls_202_until_done(client: ZenRowsBatchClient)
             },
         )
     )
+    run_route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_ingest_run_json("done"))
+    )
     get_route = respx.get(f"{BASE_URL}/jobs/J").mock(
         return_value=Response(200, json=_ingest_job_json("done"))
     )
 
     job = client.submit_regular(["https://example.com/a"], wait_for_ingest=True)
 
+    assert run_route.call_count == 1
     assert get_route.call_count == 1
     assert job.data.latest_run.ingest_status is IngestStatus.DONE
 
@@ -1565,11 +1569,9 @@ def test_rerun_without_wait_for_ingest_returns_at_once(client: ZenRowsBatchClien
 
 
 @respx.mock
-def test_submit_scheduled_wait_for_ingest_has_no_run_to_wait_for(
-    client: ZenRowsBatchClient, no_poll_sleep
-):
+def test_submit_scheduled_returns_after_one_request(client: ZenRowsBatchClient, no_poll_sleep):
     """Creating a scheduled job answers 201 with no run (the first fire
-    creates it), so there is nothing to poll."""
+    creates it), so there is nothing to poll and no wait option."""
     from zenrows.batch import Rate
 
     respx.post(f"{BASE_URL}/jobs").mock(
@@ -1577,10 +1579,65 @@ def test_submit_scheduled_wait_for_ingest_has_no_run_to_wait_for(
     )
     poll = respx.get(url__startswith=f"{BASE_URL}/jobs/J")
 
-    ref = client.submit_scheduled(
-        Rate(every=6, unit="hour"), ["https://example.com"], wait_for_ingest=True
-    )
+    ref = client.submit_scheduled(Rate(every=6, unit="hour"), ["https://example.com"])
 
     assert poll.call_count == 0
     assert ref.job_id == "J"
     assert ref.submit_response.latest_run is None
+
+
+# ===== job-level wait_for_ingest =====
+
+
+@respx.mock
+def test_job_wait_for_ingest_does_not_stop_at_a_stopped_run(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """A run stopped mid-ingest is terminal but still `pending`: the
+    job-level wait keeps polling until ingestion is done."""
+    stopped_pending = _ingest_job_json("pending")
+    stopped_pending["latest_run"]["status"] = "stopped"
+    stopped_done = _ingest_job_json("done")
+    stopped_done["latest_run"]["status"] = "stopped"
+    route = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[Response(200, json=stopped_pending), Response(200, json=stopped_done)]
+    )
+
+    out = client.job("J").wait_for_ingest()
+
+    assert route.call_count == 2
+    assert out.data.latest_run.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_submit_wait_for_ingest_polls_the_submitted_run(client: ZenRowsBatchClient, no_poll_sleep):
+    """A replayed submit can name an older run while a newer one is the
+    job's latest: the wait polls the submitted run by id."""
+    respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            202,
+            json={
+                "job_id": "J",
+                "status": "closed",
+                "accepted_tasks": 10000,
+                "latest_run": _ingest_run_json("pending"),
+            },
+        )
+    )
+    run_route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_ingest_run_json("pending", status="stopped")),
+            Response(200, json=_ingest_run_json("done", status="stopped")),
+        ]
+    )
+    newer = _ingest_job_json("pending")
+    newer["latest_run"]["run_id"] = "R3"
+    job_route = respx.get(f"{BASE_URL}/jobs/J").mock(return_value=Response(200, json=newer))
+
+    handle = client.submit_regular(
+        ["https://example.com/a"], idempotency_key="k1", wait_for_ingest=True
+    )
+
+    assert run_route.call_count == 2
+    assert job_route.call_count == 1  # one read for the handle's data, not a poll
+    assert handle.submit_response.latest_run.run_id == "R"
