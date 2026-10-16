@@ -357,6 +357,8 @@ class ZenRowsCrawlClient:
         `failed`) or `timeout` seconds pass, and return it.
 
         A `failed` crawl is returned, not raised: read `error` on it.
+        So is a crawl that `stopped` because credits ran out or the API
+        key hit a credit cap; `error` says which.
         On timeout the crawl is returned still `running`; call `wait`
         again to keep waiting, or `stop` to end it.
         """

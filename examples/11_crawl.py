@@ -4,7 +4,8 @@ Demonstrates the Crawl client (`ZenRowsCrawlClient`):
   - `create(url, depth=..., include_patterns=..., output_format="html")`
     starts a crawl and returns at once, `running`.
   - `wait(crawl_id)` polls until it ends, or 600 s pass, and returns
-    the `Crawl` (still `running` on timeout; `error` set when `failed`).
+    the `Crawl` (still `running` on timeout; `error` set when `failed`,
+    or when it `stopped` because credits ran out or the key hit a cap).
   - `results(crawl_id)` pages through the kept URLs.
   - `content(crawl_id, result)` reads one kept URL's HTML.
   - `download(crawl_id)` reads every result as NDJSON, with the crawl's
@@ -58,6 +59,9 @@ def main() -> None:
     )
     if crawl.status is CrawlStatus.FAILED and crawl.error:
         raise SystemExit(f"crawl failed: {crawl.error.code.value}: {crawl.error.detail}")
+    if crawl.status is CrawlStatus.STOPPED and crawl.error:
+        # Out of credits or at the key's cap: what it fetched stays readable.
+        print(f"stopped: {crawl.error.code.value}: {crawl.error.detail}")
     if crawl.status is CrawlStatus.RUNNING:
         print("still running: the results below are what it has kept so far")
 
