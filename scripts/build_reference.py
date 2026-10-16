@@ -28,6 +28,7 @@ SECTIONS = [
     ("zenrows.batch._download", "Downloads"),
     ("zenrows.batch._estimate", "Cost estimation"),
     ("zenrows.batch._schedule", "Schedule builders"),
+    ("zenrows.batch._webhooks", "Webhook signatures"),
     ("zenrows.batch.errors", "Errors"),
     ("zenrows.batch.models", "Models"),
 ]

@@ -23,6 +23,9 @@ Highlights:
     fill the disk.
   - `status="successful"` (the default) skips failed rows; pass
     `status=None` to grab everything.
+  - Results are kept for 14 days by default. After that a successful
+    task reads as `expired` and has no body; the download skips it
+    (and any failed row) and hands it back in `skipped=`.
 
 Run with:
     export ZENROWS_API_KEY=zr_...
@@ -33,7 +36,7 @@ import argparse
 import os
 
 from zenrows import ZenRowsBatchClient
-from zenrows.batch import DownloadLimitExceeded
+from zenrows.batch import DownloadLimitExceeded, TaskResult
 
 
 def main() -> None:
@@ -60,6 +63,7 @@ def main() -> None:
     job = client.get_job(args.job_id)
     run = job.run.wait(timeout=600.0, progress=True)
 
+    skipped: list[TaskResult] = []
     try:
         written = run.download_to_dir(
             args.out,
@@ -68,8 +72,9 @@ def main() -> None:
             progress=True,  # live tqdm bar
             max_files=20_000,  # cap row count
             max_bytes_per_file=10 * 1024 * 1024,  # cap single body @ 10 MiB
+            skipped=skipped,  # expired or failed rows, which have no body
         )
-        print(f"wrote {written} files to {args.out}/")
+        print(f"wrote {written} files to {args.out}/ ({len(skipped)} skipped)")
     except DownloadLimitExceeded as exc:
         # `limit_name` is one of: max_files, max_bytes_per_file.
         # `limit` + `observed` for diagnosis.

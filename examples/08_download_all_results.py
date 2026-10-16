@@ -6,11 +6,12 @@ the SDK polls until it's `completed`, then streams the presigned zip
 to disk. Use this when you want a single artifact; for one file per
 task instead, see `download_to_dir` (example 02).
 
-The zip has a 12h TTL and is capped at 1 GiB server-side — an
-oversize run fails the export and raises `BatchAPIError`. For larger
-runs (or one file per task), use the iterative client-side download
-`download_to_dir` (example 02): it has no size limit but is slower,
-fetching bodies one at a time (tunable via `concurrency=`).
+The export lives 12 h and its download link 2 h. The server caps one
+export at 100 GiB of results: an oversize run fails the export and
+raises `BatchAPIError`. For larger runs (or one file per task), use
+the iterative client-side download `download_to_dir` (example 02): it
+has no export cap but is slower, fetching bodies one at a time
+(tunable via `concurrency=`).
 
 `job.run.download_all_results` targets the job's current run; address
 a specific run with `client.get_run(job_id, run_id=...).download_all_results(...)`.
@@ -40,7 +41,7 @@ def main() -> None:
         path = job.run.download_all_results(args.out)
         print(f"wrote {path}")
     except BatchAPIError as e:
-        # e.g. the run exceeded the 1 GiB export cap.
+        # e.g. the run exceeded the 100 GiB export cap.
         print(f"export failed: {e}")
 
 
