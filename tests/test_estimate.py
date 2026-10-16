@@ -35,12 +35,14 @@ def test_cost_for_params_rate_card(params, tier, lo, hi):
     assert tc.exact == (lo == hi)
 
 
-@pytest.mark.parametrize("value", [True, "true", "True", " TRUE ", 1, "1", "yes", "on"])
+@pytest.mark.parametrize("value", [True, "true", "True", "TRUE"])
 def test_truthy_spellings_turn_on_a_flag(value):
     assert cost_for_params({"js_render": value}).tier is Tier.JS
 
 
-@pytest.mark.parametrize("value", [False, "false", "0", 0, "", "no"])
+# The API rejects 1, "1", "yes" and "on" for a boolean flag, so they are
+# not priced as on.
+@pytest.mark.parametrize("value", [False, "false", "0", 0, "", "no", 1, "1", "yes", "on", " TRUE "])
 def test_falsy_spellings_keep_base(value):
     assert cost_for_params({"js_render": value}).tier is Tier.BASE
 
@@ -159,3 +161,9 @@ def test_client_estimate_cost_file_input_is_zero():
     client = ZenRowsBatchClient(api_key="test-key")
     est = client.estimate_cost({"type": "regular", "status": "closed", "file_input_id": "01HKE..."})
     assert (est.task_count, est.min, est.max) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("value", ["AUTO", "Auto", " auto"])
+def test_mode_is_auto_only_for_the_exact_value(value):
+    """The API accepts only `mode: "auto"`, so other spellings price as base."""
+    assert cost_for_params({"mode": value}).tier is Tier.BASE

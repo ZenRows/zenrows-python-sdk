@@ -11,8 +11,9 @@ What's where:
 Re-exports below are the curated, stable surface. Anything in
 `models` that callers need but isn't here can be imported directly.
 
-Completion is surfaced via waiters (`job.wait()` / `run.wait()`) and
-webhooks — poll or get notified; there's no callback to wire up.
+Completion is surfaced via waiters (`job.run.wait()` / `run.wait()`) and
+webhooks: poll or get notified; there's no callback to wire up. Check a
+signed delivery with `verify_webhook_signature`.
 """
 
 from zenrows.batch._download import DownloadedResult, DownloadLimitExceeded
@@ -52,9 +53,15 @@ from zenrows.batch._typed_dicts import (
     TaskInputDict,
     WebhookDict,
 )
-from zenrows.batch._waiters import WaiterError, WaiterTimeout
+from zenrows.batch._waiters import RunPaused, WaiterError, WaiterTimeout
+from zenrows.batch._webhooks import (
+    DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+    WEBHOOK_EVENT_ID_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
+    verify_webhook_signature,
+)
 from zenrows.batch.client import TERMINAL_RUN_STATUSES, ZenRowsBatchClient
-from zenrows.batch.errors import BatchAPIError, ProblemDetail
+from zenrows.batch.errors import BatchAPIError, BatchErrorCode, ProblemDetail
 from zenrows.batch.models import (
     AddTasksRequest,
     CreateJobInputRequest,
@@ -73,14 +80,20 @@ from zenrows.batch.models import (
     TestWebhookRequest,
     TestWebhookResponse,
     WebhookConfig,
+    WebhookEvent,
+    WebhookEventType,
 )
 
 __all__ = [
+    "DEFAULT_WEBHOOK_TOLERANCE_SECONDS",
     "TERMINAL_RUN_STATUSES",
+    "WEBHOOK_EVENT_ID_HEADER",
+    "WEBHOOK_SIGNATURE_HEADER",
     "AddTasksDict",
     "AddTasksRequest",
     "At",
     "BatchAPIError",
+    "BatchErrorCode",
     "CSVFieldsDict",
     "CSVSpecDict",
     "Cadence",
@@ -108,6 +121,7 @@ __all__ = [
     "Rate",
     "Run",
     "RunHandle",
+    "RunPaused",
     "RunRef",
     "RunStatus",
     "Schedule",
@@ -127,6 +141,9 @@ __all__ = [
     "WaiterTimeout",
     "WebhookConfig",
     "WebhookDict",
+    "WebhookEvent",
+    "WebhookEventType",
     "Weekly",
     "ZenRowsBatchClient",
+    "verify_webhook_signature",
 ]

@@ -51,9 +51,9 @@ JS_AND_PROXY_CREDITS = 25
 AUTO_MIN_CREDITS = 1
 AUTO_MAX_CREDITS = 25
 
-# Param values arrive as str | bool | int. These spellings
-# count as "on" for the boolean flags.
-_TRUTHY = frozenset({"true", "1", "yes", "on"})
+# Param values arrive as str | bool | int. The API accepts only `true` /
+# `"true"` (any case) as "on" for a boolean flag and rejects `1`, `"yes"`
+# or `"on"` with a 400, so only those count: a priced job is a valid one.
 
 # What `Tier` keys can appear, in the order a breakdown should render.
 ParamValue = str | bool | int | dict[str, str]  # dict form: `custom_headers` map
@@ -170,19 +170,18 @@ class CostEstimate:
 
 
 def _truthy(value: ParamValue | None) -> bool:
-    """Coerce a scraper-param scalar to a boolean. Booleans pass
-    through; ints are nonzero-truthy; strings match the on-spellings."""
+    """True only for the values the API reads as "on": `True`, or the
+    string `"true"` in any case."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, int):
-        return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in _TRUTHY
+        return value.lower() == "true"
     return False
 
 
 def _is_auto(params: ParamMap) -> bool:
-    return str(params.get("mode", "")).strip().lower() == "auto"
+    """The API accepts only the exact value `"auto"` for `mode`."""
+    return params.get("mode") == "auto"
 
 
 def _cost_for_params(params: ParamMap) -> TaskCost:

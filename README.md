@@ -245,6 +245,12 @@ count = run.download_to_dir("./out")
 print(f"downloaded {count} results to ./out/")
 ```
 
+`run.wait()` returns once the run is terminal (`completed`, `stopped` or
+`failed`; read `failure_reason` on a failed run). A paused run never
+progresses, so the waiter raises `RunPaused` (carrying the run) instead
+of polling until its timeout; pass `wait_while_paused=True` to keep
+polling.
+
 > Need full control over the request body? `client.submit_job({...})` accepts a raw dict (the
 > wire shape) or a typed `SubmitJobRequest`, and returns the same `JobRef`.
 
@@ -268,7 +274,8 @@ job = client.submit_regular(
 
 An Extract task's result carries two keys — `html` (the raw page) and `parsed`
 (the structured data). It costs the same as a regular task, so `estimate_cost`
-prices it correctly. `extract_fields` is not supported in Batch yet.
+prices it correctly. `extract_fields` narrows the returned fields, as on
+the regular API.
 
 ### Upload URLs from a CSV
 
@@ -310,11 +317,11 @@ print(est.format())  # per-tier breakdown table
 > it lives on the client (`client.estimate_cost`) to keep your call
 > sites stable.
 
-After a run finishes, read the **actual** credits it used from
-`run.stats.spend` (`{credits, cost}`). Only successful requests are
-charged, so realized spend is ≤ the estimate. (Per-task `task.spend` is
-indicative and often absent on successful rows — rely on the run-level
-rollup for actuals.)
+After a run finishes, read the credits it used from `run.stats.spend`
+(`{credits, cost}`), an indicative figure; your account's usage page is
+authoritative. Failed tasks are not charged, except target `404` and
+`410` responses, which are billed as on the regular API. Result rows
+carry no per-task spend.
 
 ### Retry only the failed tasks
 
@@ -334,6 +341,11 @@ run = client.job(job_id).retry_failed()
 
 run.wait()
 ```
+
+Start a rerun only once the previous run is terminal, or the API answers
+`409 run_not_terminal`. A failed-only (partial) rerun works within 10
+days of the start of the run it retries; after that it raises
+`409 partial_rerun_window_expired`, and a full `rerun()` still works.
 
 ### Download results
 
@@ -382,9 +394,24 @@ artifact:
 run.download_all_results("results.zip")
 ```
 
-> The server-side zip is capped at **1 GiB** per run. For larger runs —
-> or one file per task — use `download_to_dir`, which fetches bodies
-> client-side with **no size limit** (slower; tune with `concurrency=`).
+> The server caps one export at **100 GiB** of results. For larger runs,
+> or one file per task, use `download_to_dir`, which fetches bodies
+> client-side with no export cap (slower; tune with `concurrency=`).
+
+**Expired results.** Results are kept for 14 days by default. After that
+a successful task reads as `expired`, has no `result_url`, and still
+matches `status="successful"`. The bulk helpers skip such rows (and
+failed ones) instead of stopping, log a WARNING on
+`zenrows.batch.download` with the counts, and pass each one to
+`on_skip` if you set it:
+
+```python
+from zenrows.batch import TaskStatus
+
+skipped = []
+run.download_to_dir("./out", on_skip=skipped.append)
+expired = [r for r in skipped if r.status is TaskStatus.EXPIRED]
+```
 
 **One task at a time.** When you're iterating `results()` and want only
 some bodies (a Python-side filter the `status=` argument can't express),
@@ -399,8 +426,9 @@ for task in run.results(status="successful"):
 
 `download_task_to_file` also accepts an open binary file object, not
 just a path. Every result's `result_url` is a plain presigned URL, so
-you can equally GET it with your own HTTP client (no auth header) — it's
-TTL-limited, so fetch it promptly. See examples 02 and 08.
+you can equally GET it with your own HTTP client (no auth header). It is
+valid for 2 hours; list the results again for a fresh one. See examples
+02 and 08.
 
 ### Act on an id without a GET
 
@@ -435,18 +463,46 @@ job.schedule.resume()                           # fire again
 job.schedule.update(Rate(every=1, unit="day"))  # replace the schedule
 ```
 
-Register a completion webhook at submit time, or manage it later via
-`PUT` / `DELETE /jobs/{id}/webhook`. Set `signature=True` to have each
-delivery HMAC-signed (manage signing keys via the `/hmac/keys`
-endpoints); it defaults to unsigned. Deliveries are at-least-once, so
-dedup on the `X-ZenRows-Event-Id` header.
+Register a webhook at submit time, or manage it later with
+`job.set_webhook(url, signature=...)` / `job.delete_webhook()`. You get
+one event per run: `run.completed` when it finishes on its own, or
+`run.failed` when an account error (credits, subscription, key cap)
+ends it. A run you stop yourself sends none. A failed delivery is
+retried with backoff for up to 3 days, so an event can arrive more than
+once: deduplicate on the `X-ZenRows-Event-Id` header.
+
+Set `signature=True` to have each delivery HMAC-signed; it defaults to
+unsigned. Create the signing key first with `client.rotate_hmac_key()`
+(the first key is active at once; a later rotation stages a new key you
+promote with `finalize_hmac_key()`), and store the `secret` it returns:
+it is shown once, base64-encoded. `verify_webhook_signature` checks the
+`X-Signature` header (`t=...,v1=...,kid=...`): it decodes the secret,
+recomputes HMAC-SHA256 over `<t>.<raw body>`, compares in constant time
+and rejects timestamps more than 5 minutes off.
 
 ```python
+from zenrows.batch import WEBHOOK_SIGNATURE_HEADER, WebhookEvent, verify_webhook_signature
+
 client.submit_regular(
     ["https://example.com/a"],
     webhook={"url": "https://hooks.example.com/zr", "signature": True},
 )
+
+# kid -> the base64 secret rotate_hmac_key() returned
+SECRETS = {"<kid>": "<secret>"}
+
+
+def receive(raw_body: bytes, headers) -> int:
+    # Verify the raw bytes before parsing them.
+    if not verify_webhook_signature(raw_body, headers[WEBHOOK_SIGNATURE_HEADER], SECRETS):
+        return 401
+    event = WebhookEvent.model_validate_json(raw_body)
+    print(event.event_type, event.job_id, event.run_id)
+    return 200
 ```
+
+During a key rotation, pass both secrets keyed by their `kid`; each
+delivery names the key that signed it.
 
 > No webhook receiver? Just poll for completion with `job.run.wait()` /
 > `run.wait()`.
@@ -457,16 +513,35 @@ Every non-2xx surfaces as `BatchAPIError`; the `code` attribute carries
 the stable code from the RFC 7807 body (`file_input_not_found`,
 `idempotency_key_conflict`, `api_key_cap_reached`, etc.) and `detail` the
 human-readable explanation (for a credit cap: which cap, and when it resets).
+`BatchErrorCode` names every code; its members compare equal to `code`.
 
 ```python
-from zenrows.batch import BatchAPIError
+from zenrows.batch import BatchAPIError, BatchErrorCode
 
 try:
     client.get_job("does-not-exist")
 except BatchAPIError as exc:
-    if exc.code == "not_found":
+    if exc.code == BatchErrorCode.NOT_FOUND:
         ...
     raise
+```
+
+The client retries network errors and `429` / `502` / `503` / `504` on
+requests that are safe to repeat: reads, and a submit, rerun or
+`add_tasks` call that carries an `idempotency_key`. Within 24 hours a
+repeat with the same key and body returns the first answer instead of
+doing the work twice. A `429 quota_exceeded` (3 active jobs per account,
+shared with Crawl, or 5 scheduled jobs) is not retried: it clears only
+when a job finishes, is closed or is deleted.
+
+```python
+import uuid
+
+job = client.submit_open(["https://example.com/a"])
+job.add_tasks(
+    {"tasks": [{"url": "https://example.com/b"}], "last_batch": True},
+    idempotency_key=str(uuid.uuid4()),  # one key per logical call, reused on retry
+)
 ```
 
 ### Forward-compatible enums

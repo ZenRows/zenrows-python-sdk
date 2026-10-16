@@ -65,7 +65,7 @@ from zenrows.batch._typed_dicts import (
     TaskInputDict,
     WebhookDict,
 )
-from zenrows.batch._waiters import poll_until
+from zenrows.batch._waiters import RunPaused, poll_until
 from zenrows.batch.errors import BatchAPIError
 from zenrows.batch.models import (
     AddTasksRequest,
@@ -89,6 +89,7 @@ from zenrows.batch.models import (
     ListJobRunsResponse,
     ListJobsResponse,
     ListResultsResponse,
+    PauseState,
     RerunJobResponse,
     Run,
     RunStatus,
@@ -334,6 +335,10 @@ class ZenRowsBatchClient:
     ) -> JobRef:
         """Submit a scheduled job.
 
+        Creating a scheduled job starts no run (the first fire creates
+        Run 1), so there is nothing to ingest and no `wait_for_ingest`
+        option.
+
         `schedule` is one of the typed builders (`At`, `Rate`,
         `Calendar`) or a raw `JobScheduleDict` for power users. The
         typed builders validate their inputs in `__post_init__`;
@@ -572,6 +577,7 @@ class ZenRowsBatchClient:
         poll_interval: float = 2.0,
         max_poll_interval: float = 15.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> Run:
         """Block until a run reaches one of `target_statuses`, polling
         with jittered exponential backoff.
@@ -582,9 +588,14 @@ class ZenRowsBatchClient:
         until `timeout`. Pass `failure_statuses={"failed"}` to have the
         waiter raise `WaiterError` on it instead.
 
+        A paused run (`pause_state: paused`) never progresses until
+        someone resumes it, so the waiter raises `RunPaused` (a
+        `WaiterError`, carrying the run) as soon as it sees one that is
+        not yet in a target status. Pass `wait_while_paused=True` to
+        keep polling instead, for example when another process will
+        resume it.
+
         `progress=True` shows a tqdm bar with totals as they advance.
-        `None` inherits the client-level `progress` setting (which
-        itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
         """
         return self._wait_for_run_raw(
             job_id,
@@ -595,6 +606,7 @@ class ZenRowsBatchClient:
             poll_interval=poll_interval,
             max_poll_interval=max_poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
 
     # ===== file inputs (CSV uploads) =====
@@ -720,9 +732,9 @@ class ZenRowsBatchClient:
         `.wait()` for the download URL.
 
         Failure modes: 404 if the job/run is missing or not yours.
-        The worker fails the export (status=failed,
-        error="results are larger then 1 gb") if the pre-zip total
-        exceeds the server's 1 GiB cap.
+        The server fails the export (status=failed,
+        error="results are larger than N gb") if the run's results
+        total more than the export cap (100 GiB).
         """
         resp = self._post_export_start(job_id, run_id)
         return ExportRef(self, job_id, run_id, resp.export_id, start_response=resp)
@@ -750,7 +762,7 @@ class ZenRowsBatchClient:
         check `.status` and (on `completed`) `.download_url`.
 
         `failed` is NOT raised; the caller decides whether
-        `error="results are larger then 1 gb"` is fatal or expected.
+        `error="results are larger than N gb"` is fatal or expected.
         """
         return self._wait_for_export_raw(
             job_id,
@@ -835,10 +847,17 @@ class ZenRowsBatchClient:
             Job,
         )
 
-    def _post_tasks(self, job_id: str, body: AddTasksRequest | AddTasksDict) -> AddTasksResponse:
+    def _post_tasks(
+        self,
+        job_id: str,
+        body: AddTasksRequest | AddTasksDict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> AddTasksResponse:
         body = _as_model(body, AddTasksRequest)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         return _parse(
-            self._t.request_json("POST", f"/jobs/{job_id}/tasks", body=body),
+            self._t.request_json("POST", f"/jobs/{job_id}/tasks", body=body, headers=headers),
             AddTasksResponse,
         )
 
@@ -930,9 +949,9 @@ class ZenRowsBatchClient:
         Raises `WaiterTimeout` if the export doesn't reach a terminal
         state within `wait_timeout`. Raises `BatchAPIError` with the
         server's error message on `status=failed` (e.g.
-        `"results are larger then 1 gb"`). Returns the `Path` written.
+        `"results are larger than N gb"`). Returns the `Path` written.
 
-        The server-side export is capped at 1 GiB per run. For larger
+        The server caps one export at 100 GiB of results. For larger
         runs (or one file per task), use `download_to_dir` instead: it
         fetches each body client-side with no size limit, at the cost
         of being slower (one body at a time, tunable via `concurrency=`).
@@ -984,6 +1003,7 @@ class ZenRowsBatchClient:
         poll_interval: float,
         max_poll_interval: float = 15.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> Run:
         target = target_statuses or TERMINAL_RUN_STATUSES
         if failure_statuses:
@@ -1015,6 +1035,14 @@ class ZenRowsBatchClient:
             def fetch_with_progress() -> Run:
                 run = fetch()
                 on_poll(run)
+                if (
+                    not wait_while_paused
+                    and not isinstance(run, _PendingRun)
+                    and run.pause_state is PauseState.PAUSED
+                    and not is_done(run)
+                    and not is_failure(run)
+                ):
+                    raise RunPaused(run)
                 return run
 
             return poll_until(
@@ -1026,6 +1054,29 @@ class ZenRowsBatchClient:
                 max_interval=max_poll_interval,
             )
 
+    def _wait_for_run_ingest_raw(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        timeout: float,
+        poll_interval: float,
+        max_poll_interval: float = 15.0,
+    ) -> Run:
+        """Poll one run (`GET /jobs/{id}/runs/{run_id}`) until its
+        `ingest_status` is no longer `pending`, and return it. The run
+        status is not a shortcut: a run stopped mid-ingest keeps
+        `ingest_status: pending` until the ingest worker reaches its
+        next chunk, notices the stop, cuts `stats.total` to the rows
+        written and marks ingestion done."""
+        return poll_until(
+            fetch=lambda: self._get_run_data(job_id, run_id),
+            is_done=lambda run: run.ingest_status is not IngestStatus.PENDING,
+            timeout=timeout,
+            initial_interval=poll_interval,
+            max_interval=max_poll_interval,
+        )
+
     def _wait_for_ingest_raw(
         self,
         job_id: str,
@@ -1036,17 +1087,18 @@ class ZenRowsBatchClient:
     ) -> Job:
         """Poll `GET /jobs/{id}` until the latest run's async-carrier
         ingestion is no longer `pending`. Done means: `ingest_status`
-        is `done` or absent (the run never ingested asynchronously),
-        the run is terminal (a mid-ingest stop flips the field to
-        `done` — SPEC §3.1), or there is no run yet (nothing is
-        ingesting). Returns the final `Job` snapshot."""
+        is `done` or absent (the run never ingested asynchronously), or
+        there is no run yet (nothing is ingesting). A terminal status
+        is not enough: a run stopped mid-ingest keeps `pending` until
+        the ingest worker settles its rows and marks it done. Returns
+        the final `Job` snapshot."""
 
         def fetch() -> Job:
             return self._get_job_data(job_id)
 
         def is_done(job: Job) -> bool:
             run = job.latest_run
-            if run is None or run.status.value in TERMINAL_RUN_STATUSES:
+            if run is None:
                 return True
             return run.ingest_status is not IngestStatus.PENDING
 
@@ -1071,6 +1123,7 @@ class ZenRowsBatchClient:
         progress: bool,
         max_files: int | None,
         max_bytes_per_file: int | None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
         return download_to_dir(
             self,
@@ -1086,6 +1139,7 @@ class ZenRowsBatchClient:
             max_bytes_per_file=(
                 max_bytes_per_file if max_bytes_per_file is not None else DEFAULT_MAX_BYTES_PER_FILE
             ),
+            on_skip=on_skip,
         )
 
     def _download_memory(
@@ -1099,6 +1153,7 @@ class ZenRowsBatchClient:
         max_count: int | None,
         max_total_bytes: int | None,
         max_bytes_per_file: int | None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> list[DownloadedResult]:
         return download_to_memory(
             self,
@@ -1116,6 +1171,7 @@ class ZenRowsBatchClient:
             max_bytes_per_file=(
                 max_bytes_per_file if max_bytes_per_file is not None else DEFAULT_MAX_BYTES_PER_FILE
             ),
+            on_skip=on_skip,
         )
 
 

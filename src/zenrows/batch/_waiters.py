@@ -15,7 +15,10 @@ too.
 import random
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
+
+if TYPE_CHECKING:
+    from zenrows.batch.models import Run
 
 T = TypeVar("T")
 
@@ -26,6 +29,23 @@ class WaiterTimeout(TimeoutError):
 
 class WaiterError(RuntimeError):
     """Raised when the resource entered a `failure_states` value."""
+
+
+class RunPaused(WaiterError):
+    """Raised by a run waiter when the run is paused
+    (`pause_state: paused`) and not yet in a target status.
+
+    A paused run makes no progress until someone resumes it, so the
+    waiter stops at once instead of polling until its timeout. `run` is
+    the run as last read. Resume it with `job.run.resume()` and wait
+    again, or pass `wait_while_paused=True` to keep polling.
+    """
+
+    def __init__(self, run: "Run"):
+        self.run = run
+        super().__init__(
+            f"waiter: run {run.run_id} is paused; resume it with job.run.resume() and wait again"
+        )
 
 
 def poll_until(

@@ -13,6 +13,11 @@ The `secret` field is returned **only** in the `/rotate` response —
 this is your one chance to capture it. Subsequent reads give you
 just `kid` + `created_at`.
 
+The secret is base64-encoded. Keep it as returned and pass it, keyed
+by `kid`, to `verify_webhook_signature`, which decodes it before
+computing the HMAC. If you verify by hand, base64-decode it first:
+the HMAC key is the decoded 32 bytes, not the text.
+
 Typical client flow:
   1. `rotate_hmac_key()`        → install K2 alongside K1 in your verifier
   2. (deploy K2 everywhere)
@@ -48,6 +53,9 @@ def main() -> None:
             return
         raise
 
+    # Your receiver checks deliveries with every key it may still see:
+    #   verify_webhook_signature(raw_body, headers[WEBHOOK_SIGNATURE_HEADER],
+    #                            {old_kid: old_secret, rotated.kid: rotated.secret})
     # Once your verifiers accept the new key, promote it:
     # client.finalize_hmac_key()
     # ...or back out:
