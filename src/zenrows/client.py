@@ -12,7 +12,9 @@ For the async (job-based) Batch API, see `zenrows.ZenRowsBatchClient`.
 """
 
 import asyncio
+import contextvars
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -21,6 +23,7 @@ from typing import Any
 import requests
 import urllib3
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import InvalidHeader, MaxRetryError, ResponseError
 from urllib3.util.retry import Retry
 
 from zenrows.__version__ import __version__
@@ -28,11 +31,129 @@ from zenrows.__version__ import __version__
 DEFAULT_SCRAPER_URL = "https://api.zenrows.com/v1/"
 DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 
-# Status codes the urllib3 retry layer treats as transient. 422 is retried
-# too, but in `_worker`, because whether it is worth retrying depends on the
-# response body (see `is_no_data_extracted`).
-_RETRY_STATUSES = [429, 500, 502, 503, 504]
-_RETRY_BACKOFF_FACTOR = 0.5
+# Status codes worth another try. None of them is charged: 429 is a rate
+# limit, 503 is the gateway asking to retry later, 502 and 504 never reached
+# the target. Every other 4xx/5xx is the final answer.
+_RETRY_STATUSES = (429, 502, 503, 504)
+DEFAULT_RETRIES = 2
+# Longest wait between two tries, in seconds: the cap on `Retry-After` and on
+# the jittered backoff. Same cap as the Crawl client's `stop()` retry.
+DEFAULT_RETRY_MAX_WAIT = 30.0
+# Longest a call may keep retrying, in seconds, counted from its first try:
+# no retry starts if the wait before it would end past this.
+DEFAULT_RETRY_BUDGET = 90.0
+# Shortest jittered wait, so a retry never fires back to back.
+_RETRY_MIN_WAIT = 0.25
+
+# Clock for the retry budget; tests replace it.
+_monotonic = time.monotonic
+
+# When the current call's first try started. Set per call by
+# `_RetryBudgetAdapter.send`; a context variable, so concurrent calls on
+# the client's thread pool each see their own.
+_call_started: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "zenrows_call_started", default=None
+)
+
+
+class _JitteredRetry(Retry):
+    """urllib3 `Retry` with the Zenrows client retry policy.
+
+    Between tries it waits the server's `Retry-After` (delta-seconds or
+    HTTP-date), capped at `retry_max_wait`; without one it waits a random time
+    in `[0.25, min(retry_max_wait, 2 ** attempt)]` seconds (full jitter,
+    `attempt` counting from 0). It never starts a retry whose wait would end
+    more than `retry_budget` seconds after the call's first try.
+
+    Only the hooks urllib3 1.26 and 2.x share are overridden, so it works on
+    both (no `backoff_jitter` / `retry_after_max`).
+    """
+
+    # urllib3 also retries 413 when it carries `Retry-After`; we don't.
+    RETRY_AFTER_STATUS_CODES = frozenset({429, 503})
+
+    def __init__(
+        self,
+        *args: Any,
+        retry_max_wait: float = DEFAULT_RETRY_MAX_WAIT,
+        retry_budget: float = DEFAULT_RETRY_BUDGET,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self.retry_max_wait = retry_max_wait
+        self.retry_budget = retry_budget
+        self._started: float | None = None
+        # The wait before the next try, drawn once in `increment` so the
+        # budget check and the sleep agree on it.
+        self._delay: float | None = None
+
+    def new(self, **kw: Any) -> "_JitteredRetry":
+        retry = super().new(**kw)
+        retry.retry_max_wait = self.retry_max_wait
+        retry.retry_budget = self.retry_budget
+        started = self._started
+        if started is None:
+            started = _call_started.get()
+        if started is None:
+            started = _monotonic()
+        retry._started = started
+        return retry
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: Any = None,
+        error: Exception | None = None,
+        _pool: Any = None,
+        _stacktrace: Any = None,
+    ) -> "_JitteredRetry":
+        retry = super().increment(method, url, response, error, _pool, _stacktrace)
+        retry._delay = retry._next_delay(response)
+        started = retry._started if retry._started is not None else _monotonic()
+        if _monotonic() - started + retry._delay > retry.retry_budget:
+            reason = error or ResponseError(f"retry budget of {retry.retry_budget}s spent")
+            raise MaxRetryError(_pool, url, reason) from reason
+        return retry
+
+    def get_backoff_time(self) -> float:
+        if self._delay is not None:
+            return self._delay
+        return self._jitter()
+
+    def get_retry_after(self, response: Any) -> float | None:
+        try:
+            retry_after = super().get_retry_after(response)
+        except InvalidHeader:
+            return None  # unparseable: fall back to the jittered backoff
+        if retry_after is None:
+            return None
+        return min(retry_after, self.retry_max_wait)
+
+    def _next_delay(self, response: Any) -> float:
+        # Mirrors `Retry.sleep`: a positive `Retry-After` wins over the backoff.
+        if response is not None and self.respect_retry_after_header:
+            retry_after = self.get_retry_after(response)
+            if retry_after:
+                return retry_after
+        return self._jitter()
+
+    def _jitter(self) -> float:
+        attempt = min(max(len(self.history) - 1, 0), 30)
+        ceiling = min(self.retry_max_wait, 2.0**attempt)
+        return random.uniform(min(_RETRY_MIN_WAIT, ceiling), ceiling)
+
+
+class _RetryBudgetAdapter(HTTPAdapter):
+    """Marks when each call's first try starts, for the retry budget."""
+
+    def send(self, request: Any, *args: Any, **kwargs: Any) -> requests.Response:
+        token = _call_started.set(_monotonic())
+        try:
+            return super().send(request, *args, **kwargs)
+        finally:
+            _call_started.reset(token)
+
 
 # Extract's answer when it knows the kind of page but none of the fields came
 # back filled. Retrying returns the same answer, so it is never retried.
@@ -105,6 +226,13 @@ class ZenRowsClient:
 
     `base_url` defaults to the public production endpoint; override via
     constructor arg or `ZENROWS_SCRAPER_BASE_URL` env var.
+
+    `retries` (default 2) retries a 429, 502, 503 or 504, and a failure to
+    connect, never any other status or a read timeout. Between tries it waits
+    the server's `Retry-After`, or else a random 0.25s to `2 ** attempt`
+    seconds; either is capped at `retry_max_wait` (default 30). No retry starts
+    if its wait would end more than `retry_budget` seconds (default 90) after
+    the first try. Pass `retries=0` to turn retries off.
     """
 
     # Kept as a class attribute for compatibility — pre-1.4 callers
@@ -114,10 +242,12 @@ class ZenRowsClient:
     def __init__(
         self,
         apikey: str,
-        retries: int = 0,
+        retries: int = DEFAULT_RETRIES,
         concurrency: int = 5,
         *,
         base_url: str | None = None,
+        retry_max_wait: float = DEFAULT_RETRY_MAX_WAIT,
+        retry_budget: float = DEFAULT_RETRY_BUDGET,
     ):
         if not apikey:
             raise ValueError("ZenRowsClient: apikey is required.")
@@ -127,14 +257,25 @@ class ZenRowsClient:
         self.retries = retries
         self.executor = ThreadPoolExecutor(max_workers=concurrency)
         self.requests_session = requests.Session()
+        self.retry_max_wait = retry_max_wait
+        self.retry_budget = retry_budget
         if retries > 0:
-            max_retries = Retry(
+            # Retries a 429/502/503/504 and a failure to connect, nothing
+            # else: a read error or timeout may come after the server
+            # accepted the request, which keeps running and may be charged.
+            max_retries = _JitteredRetry(
                 total=retries,
-                backoff_factor=_RETRY_BACKOFF_FACTOR,
+                connect=retries,
+                read=False,  # re-raise as is, so it stays a ReadTimeout
+                status=retries,
+                other=0,
+                allowed_methods=None,
                 status_forcelist=_RETRY_STATUSES,
                 raise_on_status=False,
+                retry_max_wait=retry_max_wait,
+                retry_budget=retry_budget,
             )
-            adapter = HTTPAdapter(max_retries=max_retries)
+            adapter = _RetryBudgetAdapter(max_retries=max_retries)
             self.requests_session.mount("https://", adapter)
             self.requests_session.mount("http://", adapter)
 
@@ -354,7 +495,7 @@ class ZenRowsClient:
             final_headers["Connection"] = None
             final_headers.update(headers)
 
-        response = self.requests_session.request(
+        return self.requests_session.request(
             method,
             self.api_url,
             params=final_params,
@@ -362,25 +503,3 @@ class ZenRowsClient:
             data=data,
             **kwargs,
         )
-        # Retry a 422 here rather than in urllib3, which can't read the body:
-        # Extract's `no_data_extracted` is a final answer, any other 422 is a
-        # failure to get the target's content and is worth another try.
-        attempt = 0
-        while (
-            response.status_code == 422
-            and attempt < self.retries
-            and not is_no_data_extracted(response)
-        ):
-            attempt += 1
-            # Same schedule as urllib3's Retry: no wait before the first retry.
-            if attempt > 1:
-                time.sleep(_RETRY_BACKOFF_FACTOR * 2 ** (attempt - 1))
-            response = self.requests_session.request(
-                method,
-                self.api_url,
-                params=final_params,
-                headers=final_headers,
-                data=data,
-                **kwargs,
-            )
-        return response

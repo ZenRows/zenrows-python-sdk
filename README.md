@@ -57,7 +57,7 @@ Start using the API by [creating your API Key](https://www.zenrows.com/register?
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
-It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 422, 429, 500, 502, 503, and 504, except Extract's `422 no_data_extracted`). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
+The client retries a request up to 2 times by default (`retries=2`), and only when another try can help: a `429`, `502`, `503` or `504` response, none of which is charged, or a failure to connect. It never retries any other status (including any `422`) or a read timeout, because the server may still be working on that request. Between tries it waits the server's `Retry-After` header, or else a random time between 0.25 seconds and `2 ** attempt` seconds (full jitter); either wait is capped at `retry_max_wait` (default 30 seconds). It starts no retry whose wait would end more than `retry_budget` seconds (default 90) after the first try. Pass `retries=0` to turn retries off.
 
 `client.fetch()` is the primary method for the main page-scraping product; `client.get()` still works and is kept as a deprecated alias.
 
