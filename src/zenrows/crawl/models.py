@@ -12,7 +12,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from zenrows.batch._open_enum import open_enum_missing
 
@@ -61,10 +61,23 @@ class OutputFormat(Enum):
     _missing_ = classmethod(open_enum_missing)
 
 
+class DiscoveryStrategy(Enum):
+    """How the crawl finds the URLs it follows on each page it walks.
+
+    `links` follows the links in the page's HTML. The server may run a
+    crawl with a strategy this version does not list, and it parses as
+    an `UNKNOWN` member keeping the raw value."""
+
+    LINKS = "links"
+
+    _missing_ = classmethod(open_enum_missing)
+
+
 class CrawlErrorCode(Enum):
     """Why a crawl failed (`Crawl.error.code`)."""
 
     INSUFFICIENT_CREDITS = "insufficient_credits"
+    API_KEY_CAP_REACHED = "api_key_cap_reached"
     SEED_UNREACHABLE = "seed_unreachable"
     DOMAIN_NOT_ALLOWED = "domain_not_allowed"
     NO_ITEMS_FOUND = "no_items_found"
@@ -104,6 +117,10 @@ class Crawl(BaseModel):
     created without one: it has no depth limit."""
     max_items: int
     max_pages: int
+    discovery: list[DiscoveryStrategy] = Field(default_factory=lambda: [DiscoveryStrategy.LINKS])
+    """The strategies the crawl finds URLs with. `["links"]` when the
+    create left it out, which is also what this reads when the server
+    does not send the field at all."""
     coverage: Coverage
     created_at: datetime
     stop_reason: StopReason | None = None
@@ -179,6 +196,7 @@ __all__ = [
     "CrawlStatus",
     "CrawlStop",
     "CrawlWithResults",
+    "DiscoveryStrategy",
     "DownloadLine",
     "OutputFormat",
     "RunError",

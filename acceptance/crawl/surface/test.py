@@ -134,7 +134,7 @@ record(
 )
 
 subs = [
-    ('"https://example.com/products/"', json.dumps(CRAWL_URL), "start URL → CRAWL_URL"),
+    ('"https://www.scrapingcourse.com/ecommerce/"', json.dumps(CRAWL_URL), "start URL → CRAWL_URL"),
     ("max_items=50,", "max_items=5,", "max_items 50 → 5"),
     ("max_pages=100,", "max_pages=10,", "max_pages 100 → 10 (at most 10)"),
     (
@@ -143,6 +143,17 @@ subs = [
         "include → CRAWL_INCLUDE",
     ),
 ]
+if API_BASE != "https://api.zenrows.com/v1":
+    # The quickstart leaves the base URL out, so it would reach production
+    # whatever CRAWL_API_BASE says. Point it where the rest of the run goes.
+    subs.append(
+        (
+            'ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])',
+            'ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"], '
+            f"base_url={json.dumps(API_BASE)})",
+            "base URL → CRAWL_API_BASE",
+        )
+    )
 quick, applied = block or "", []
 for a, b, why in subs:
     if a in quick:
@@ -248,7 +259,8 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StandIn)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 from zenrows import ZenRowsCrawlClient  # noqa: E402  (imported once installed, as a user would)
-from zenrows.crawl import CrawlAPIError  # noqa: E402
+from zenrows.batch._open_enum import is_unknown  # noqa: E402
+from zenrows.crawl import CrawlAPIError, CrawlErrorCode  # noqa: E402
 
 cap = ZenRowsCrawlClient(
     "capture-key", base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1", retries=0
@@ -839,6 +851,82 @@ run_check(
     live=True,
 )
 
+
+def c22():
+    """discovery: sent as given, echoed back, and ["links"] when left out."""
+    given = create(discovery=["links"], **BASE)
+    left_out = create(**{**BASE, "max_items": 1})
+    for c in (given, left_out):
+        client.stop(c.crawl_id)
+    values = [[d.value for d in c.discovery] for c in (given, left_out)]
+    return (
+        pass_if(values == [["links"], ["links"]]),
+        json.dumps({"discovery=['links']": values[0], "left out": values[1]}),
+        "",
+    )
+
+
+def c23():
+    """content(download=True): the same page, asked for as a file to save."""
+
+    def first_fetched(crawl_id):
+        return next(
+            (r for r in client.get(crawl_id, limit=100).results if r.content_url),
+            None,
+        )
+
+    # The stop in check 20 can land before any of B's pages is fetched. Then read
+    # a one-item html crawl that runs to the end instead, as check 9 does.
+    b = state.get("B")
+    src = b.crawl_id if b else None
+    fetched = first_fetched(src) if src else None
+    if not fetched:
+        own = create(**{**BASE, "max_items": 1, "output_format": "html"})
+        client.wait(own.crawl_id)
+        src = own.crawl_id
+        fetched = first_fetched(src)
+    if not fetched:
+        return FAIL, f"no result with a content_url on {src}", ""
+    plain = client.content(src, fetched)
+    as_file = client.content(src, fetched, download=True)
+    return (
+        pass_if(plain == as_file and bool(plain)),
+        f"same {len(plain)} chars with and without download=True",
+        trim(plain, 400),
+    )
+
+
+def c24():
+    """api_key_cap_reached parses as the named member, not as UNKNOWN."""
+    code = CrawlErrorCode("api_key_cap_reached")
+    return (
+        pass_if(code is CrawlErrorCode.API_KEY_CAP_REACHED and not is_unknown(code)),
+        f"{code!r} (name {code.name})",
+        "",
+    )
+
+
+run_check(
+    "22",
+    "Discovery",
+    'create(discovery=["links"]) is echoed back, and a create without it reads ["links"]',
+    c22,
+    live=True,
+)
+run_check(
+    "23",
+    "Content as a file",
+    "content(download=True) returns the same page as content() does",
+    c23,
+    live=True,
+)
+run_check(
+    "24",
+    "Run error codes",
+    "api_key_cap_reached is a named CrawlErrorCode member, not an unknown value",
+    c24,
+)
+
 with open(f"{RESULTS}/naming.json", "w") as f:
     json.dump(
         {
@@ -856,11 +944,13 @@ with open(f"{RESULTS}/naming.json", "w") as f:
                     "include_patterns",
                     "exclude_patterns",
                     "output_format",
+                    "discovery",
                     "idempotency_key",
                     "cursor",
                     "limit",
                     "timeout",
                     "content_id",
+                    "download",
                 ]
             },
         },
