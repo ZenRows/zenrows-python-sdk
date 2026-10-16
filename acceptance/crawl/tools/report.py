@@ -38,7 +38,7 @@ CHECK_TITLES = {
     "16": "Errors carry the server code",
     "17": "Naming",
     "18": "Copy",
-    "19": "Failed crawl",
+    "19": "Patterns match nothing",
     "20": "Results after stop",
     "21": "Documented defaults",
 }

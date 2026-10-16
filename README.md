@@ -607,7 +607,13 @@ for result in client.results(crawl.crawl_id):  # follows next_cursor
 `wait` returns the crawl when it ends, or when `timeout` (seconds,
 default 600) runs out. It does not raise: on timeout the crawl is still
 `running` (call `wait` again, or `stop`), and a `failed` crawl comes
-back with `crawl.error` set. `results` does not poll: it returns at the first empty page, so on a
+back with `crawl.error` set. A crawl whose pages held nothing new to
+follow (no link, only links to other sites, or only links the patterns
+reject) ends `completed` with no results and no `error`: check the
+patterns against the URLs the start page links to. A crawl that ran
+out of credits, or whose API key hit a credit cap, ends `stopped` with `crawl.error.code`
+`insufficient_credits` or `api_key_cap_reached` and no `stop_reason`; the
+pages it fetched before that stay readable. `results` does not poll: it returns at the first empty page, so on a
 running crawl it yields only the URLs kept so far. Call `wait` first to
 read every result. `results(crawl_id, limit=...)` sets the page size of
 each request. `get(crawl_id, cursor=..., limit=...)` returns one raw page.
@@ -688,8 +694,9 @@ except CrawlAPIError as exc:
 | 503 | `crawl_busy` | `stop` could not be saved yet; the crawl is still running. `stop` retries it up to `retries` times, waiting `exc.retry_after` seconds, then raises it. Repeating the stop is safe. |
 
 `code` is None when the response has no problem body with a code (for
-example a 502 from a proxy). A crawl that ended `failed` is not an error
-response: read `crawl.error.code` and `crawl.error.detail` on it. Response enums (`CrawlStatus`, `StopReason`,
+example a 502 from a proxy). A crawl that ended `failed`, or `stopped` on
+credits, is not an error response: read `crawl.error.code` and
+`crawl.error.detail` on it. Response enums (`CrawlStatus`, `StopReason`,
 `ContentStatus`, ...) are open: a value added later parses as an
 `UNKNOWN` member that keeps the raw value.
 

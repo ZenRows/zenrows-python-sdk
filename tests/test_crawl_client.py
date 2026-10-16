@@ -232,6 +232,41 @@ def test_get_parses_failed_crawl_error(client: ZenRowsCrawlClient):
     assert page.error is not None and page.error.code is CrawlErrorCode.SEED_UNREACHABLE
 
 
+# What the server says when credits end a crawl, as error.detail.
+CREDIT_STOP_DETAIL = {
+    "insufficient_credits": "The crawl stopped because your account has no credits left.",
+    "api_key_cap_reached": "The crawl stopped because your API key reached one of its credit caps.",
+}
+
+
+@pytest.mark.parametrize(
+    ("code", "member"),
+    [
+        ("insufficient_credits", CrawlErrorCode.INSUFFICIENT_CREDITS),
+        ("api_key_cap_reached", CrawlErrorCode.API_KEY_CAP_REACHED),
+    ],
+)
+@respx.mock
+def test_wait_returns_crawl_stopped_on_credits(
+    client: ZenRowsCrawlClient, no_sleep, code: str, member: CrawlErrorCode
+):
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200,
+            json=crawl_body(
+                status="stopped",
+                error={"code": code, "detail": CREDIT_STOP_DETAIL[code]},
+                results=[],
+                next_cursor=None,
+            ),
+        )
+    )
+    crawl = client.wait("c_1")
+    assert crawl.status is CrawlStatus.STOPPED
+    assert crawl.stop_reason is None
+    assert crawl.error is not None and crawl.error.code is member
+
+
 @respx.mock
 def test_get_omits_unset_query_params(client: ZenRowsCrawlClient):
     route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
@@ -645,7 +680,11 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
             200,
             json=crawl_body(
                 status="failed",
-                error={"code": "no_items_found", "detail": "No URL matched."},
+                error={
+                    "code": "no_items_found",
+                    "detail": "The crawl read the start page but found no data it could use, "
+                    "so it had nothing to follow. Start from a listing or product page.",
+                },
                 results=[],
                 next_cursor=None,
             ),
