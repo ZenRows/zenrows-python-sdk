@@ -65,7 +65,7 @@ from zenrows.batch._typed_dicts import (
     TaskInputDict,
     WebhookDict,
 )
-from zenrows.batch._waiters import poll_until
+from zenrows.batch._waiters import RunPaused, poll_until
 from zenrows.batch.errors import BatchAPIError
 from zenrows.batch.models import (
     AddTasksRequest,
@@ -89,6 +89,7 @@ from zenrows.batch.models import (
     ListJobRunsResponse,
     ListJobsResponse,
     ListResultsResponse,
+    PauseState,
     RerunJobResponse,
     Run,
     RunStatus,
@@ -572,6 +573,7 @@ class ZenRowsBatchClient:
         poll_interval: float = 2.0,
         max_poll_interval: float = 15.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> Run:
         """Block until a run reaches one of `target_statuses`, polling
         with jittered exponential backoff.
@@ -582,9 +584,14 @@ class ZenRowsBatchClient:
         until `timeout`. Pass `failure_statuses={"failed"}` to have the
         waiter raise `WaiterError` on it instead.
 
+        A paused run (`pause_state: paused`) never progresses until
+        someone resumes it, so the waiter raises `RunPaused` (a
+        `WaiterError`, carrying the run) as soon as it sees one that is
+        not yet in a target status. Pass `wait_while_paused=True` to
+        keep polling instead, for example when another process will
+        resume it.
+
         `progress=True` shows a tqdm bar with totals as they advance.
-        `None` inherits the client-level `progress` setting (which
-        itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
         """
         return self._wait_for_run_raw(
             job_id,
@@ -595,6 +602,7 @@ class ZenRowsBatchClient:
             poll_interval=poll_interval,
             max_poll_interval=max_poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
 
     # ===== file inputs (CSV uploads) =====
@@ -991,6 +999,7 @@ class ZenRowsBatchClient:
         poll_interval: float,
         max_poll_interval: float = 15.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> Run:
         target = target_statuses or TERMINAL_RUN_STATUSES
         if failure_statuses:
@@ -1022,6 +1031,14 @@ class ZenRowsBatchClient:
             def fetch_with_progress() -> Run:
                 run = fetch()
                 on_poll(run)
+                if (
+                    not wait_while_paused
+                    and not isinstance(run, _PendingRun)
+                    and run.pause_state is PauseState.PAUSED
+                    and not is_done(run)
+                    and not is_failure(run)
+                ):
+                    raise RunPaused(run)
                 return run
 
             return poll_until(
@@ -1078,7 +1095,7 @@ class ZenRowsBatchClient:
         progress: bool,
         max_files: int | None,
         max_bytes_per_file: int | None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
         return download_to_dir(
             self,
@@ -1094,7 +1111,7 @@ class ZenRowsBatchClient:
             max_bytes_per_file=(
                 max_bytes_per_file if max_bytes_per_file is not None else DEFAULT_MAX_BYTES_PER_FILE
             ),
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
     def _download_memory(
@@ -1108,7 +1125,7 @@ class ZenRowsBatchClient:
         max_count: int | None,
         max_total_bytes: int | None,
         max_bytes_per_file: int | None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> list[DownloadedResult]:
         return download_to_memory(
             self,
@@ -1126,7 +1143,7 @@ class ZenRowsBatchClient:
             max_bytes_per_file=(
                 max_bytes_per_file if max_bytes_per_file is not None else DEFAULT_MAX_BYTES_PER_FILE
             ),
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
 

@@ -6,18 +6,18 @@ The digest is HMAC-SHA256 over the bytes `<t>.<raw request body>`, keyed
 with your signing secret. The API returns that secret once, base64-encoded,
 from `rotate_hmac_key()`; `verify_webhook_signature` decodes it for you.
 
-    from zenrows.batch import SIGNATURE_HEADER, verify_webhook_signature
+    from zenrows.batch import WEBHOOK_SIGNATURE_HEADER, verify_webhook_signature
 
     ok = verify_webhook_signature(
         request.body,                       # raw bytes, before any JSON parsing
-        request.headers[SIGNATURE_HEADER],
+        request.headers[WEBHOOK_SIGNATURE_HEADER],
         {"<kid>": "<base64 secret>"},       # every key you may still receive
     )
 
 During a key rotation, keep both the old and the new secret in the
 mapping: the header's `kid` picks the one that signed. Deliveries can
 repeat, so deduplicate on the `X-ZenRows-Event-Id` header
-(`EVENT_ID_HEADER`).
+(`WEBHOOK_EVENT_ID_HEADER`).
 """
 
 import base64
@@ -29,13 +29,13 @@ import re
 import time
 from collections.abc import Mapping
 
-SIGNATURE_HEADER = "X-Signature"
+WEBHOOK_SIGNATURE_HEADER = "X-Signature"
 """The header that carries a signed delivery's signature."""
 
-EVENT_ID_HEADER = "X-ZenRows-Event-Id"
+WEBHOOK_EVENT_ID_HEADER = "X-ZenRows-Event-Id"
 """The header that carries a delivery's event id. Deduplicate on it."""
 
-DEFAULT_WEBHOOK_TOLERANCE = 300
+DEFAULT_WEBHOOK_TOLERANCE_SECONDS = 300
 """Seconds a signature's timestamp may be from the current time."""
 
 # The API issues signing secrets of exactly 32 random bytes. Refusing any
@@ -53,7 +53,7 @@ def verify_webhook_signature(
     signature_header: str,
     secrets: Mapping[str, str],
     *,
-    tolerance: float = DEFAULT_WEBHOOK_TOLERANCE,
+    tolerance_seconds: float = DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
     now: float | None = None,
 ) -> bool:
     """Return True when `signature_header` is a valid signature of `raw_body`.
@@ -64,7 +64,7 @@ def verify_webhook_signature(
     - `secrets`: maps each key id (`kid`) to its secret as the API
       returned it: a base64 string that decodes to 32 bytes. Any other
       secret, including an empty one, never verifies.
-    - `tolerance`: the largest accepted gap, in seconds, between the
+    - `tolerance_seconds`: the largest accepted gap, in seconds, between the
       signature's timestamp and `now`, in either direction. `0` turns
       the check off; a negative value rejects every delivery.
     - `now`: the current Unix time in seconds (default: `time.time()`).
@@ -77,7 +77,7 @@ def verify_webhook_signature(
         return False
     if not isinstance(raw_body, (bytes, bytearray, memoryview, str)):
         return False
-    if not _finite_number(tolerance) or tolerance < 0:
+    if not _finite_number(tolerance_seconds) or tolerance_seconds < 0:
         return False
     if now is not None and not _finite_number(now):
         return False
@@ -106,9 +106,9 @@ def verify_webhook_signature(
     if len(key) != _SECRET_BYTES:
         return False
 
-    if tolerance > 0:
+    if tolerance_seconds > 0:
         current = time.time() if now is None else now
-        if abs(current - int(t)) > tolerance:
+        if abs(current - int(t)) > tolerance_seconds:
             return False
 
     try:
@@ -130,8 +130,8 @@ def _finite_number(value: object) -> bool:
 
 
 __all__ = [
-    "DEFAULT_WEBHOOK_TOLERANCE",
-    "EVENT_ID_HEADER",
-    "SIGNATURE_HEADER",
+    "DEFAULT_WEBHOOK_TOLERANCE_SECONDS",
+    "WEBHOOK_EVENT_ID_HEADER",
+    "WEBHOOK_SIGNATURE_HEADER",
     "verify_webhook_signature",
 ]

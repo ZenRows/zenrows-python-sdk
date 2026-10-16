@@ -404,7 +404,8 @@ def wait_for_run(job_id: str,
                  timeout: float = 300.0,
                  poll_interval: float = 2.0,
                  max_poll_interval: float = 15.0,
-                 progress: bool = False) -> Run
+                 progress: bool = False,
+                 wait_while_paused: bool = False) -> Run
 ```
 
 Block until a run reaches one of `target_statuses`, polling
@@ -416,9 +417,14 @@ included, so a run the API auto-failed is returned (read
 until `timeout`. Pass `failure_statuses={"failed"}` to have the
 waiter raise `WaiterError` on it instead.
 
+A paused run (`pause_state: paused`) never progresses until
+someone resumes it, so the waiter raises `RunPaused` (a
+`WaiterError`, carrying the run) as soon as it sees one that is
+not yet in a target status. Pass `wait_while_paused=True` to
+keep polling instead, for example when another process will
+resume it.
+
 `progress=True` shows a tqdm bar with totals as they advance.
-`None` inherits the client-level `progress` setting (which
-itself defaults to off unless `ZENROWS_BATCH_PROGRESS=true`).
 
 <a id="ZenRowsBatchClient.create_job_input"></a>
 
@@ -673,22 +679,23 @@ def delete() -> None
 #### download\_to\_dir
 
 ```python
-def download_to_dir(target_dir: str | Path,
-                    *,
-                    status: str | None = "successful",
-                    name_fn: Callable[[TaskResult], str] | None = None,
-                    use_external_id: bool = False,
-                    concurrency: int = 1,
-                    progress: bool = False,
-                    max_files: int | None = None,
-                    max_bytes_per_file: int | None = None,
-                    skipped: list[TaskResult] | None = None) -> int
+def download_to_dir(
+        target_dir: str | Path,
+        *,
+        status: str | None = "successful",
+        name_fn: Callable[[TaskResult], str] | None = None,
+        use_external_id: bool = False,
+        concurrency: int = 1,
+        progress: bool = False,
+        max_files: int | None = None,
+        max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None) -> int
 ```
 
 Write every matching task's body to ``target_dir``, one file
 per task. Returns the number of files written. Failed and
-``expired`` rows have no body: they are skipped and appended to
-``skipped`` when you pass a list.
+``expired`` rows have no body: they are skipped and passed to
+``on_skip`` when you set it.
 
 <a id="RunRef.download_to_memory"></a>
 
@@ -696,19 +703,20 @@ per task. Returns the number of files written. Failed and
 
 ```python
 def download_to_memory(
-        *,
-        status: str | None = "successful",
-        concurrency: int = 1,
-        progress: bool = False,
-        max_count: int | None = None,
-        max_total_bytes: int | None = None,
-        max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None) -> "list[DownloadedResult]"
+    *,
+    status: str | None = "successful",
+    concurrency: int = 1,
+    progress: bool = False,
+    max_count: int | None = None,
+    max_total_bytes: int | None = None,
+    max_bytes_per_file: int | None = None,
+    on_skip: Callable[[TaskResult], None] | None = None
+) -> "list[DownloadedResult]"
 ```
 
 Load every matching task's body into memory. Failed and
-``expired`` rows have no body: they are skipped and appended to
-``skipped`` when you pass a list.
+``expired`` rows have no body: they are skipped and passed to
+``on_skip`` when you set it.
 
 <a id="RunRef.download_task_to_file"></a>
 
@@ -744,12 +752,15 @@ def wait(*,
          failure_statuses: set[str] | frozenset[str] | None = None,
          timeout: float = 300.0,
          poll_interval: float = 2.0,
-         progress: bool = False) -> "RunHandle"
+         progress: bool = False,
+         wait_while_paused: bool = False) -> "RunHandle"
 ```
 
 Block until this run reaches a target state. Returns a fresh
 loaded :class:`RunHandle` so chains like
 ``run.wait().download_to_dir(...)`` work without re-wrapping.
+A paused run raises :class:`RunPaused` unless
+``wait_while_paused=True``.
 
 <a id="RunRef.start_export"></a>
 
@@ -989,14 +1000,17 @@ def wait(*,
          failure_statuses: set[str] | frozenset[str] | None = None,
          timeout: float = 300.0,
          poll_interval: float = 2.0,
-         progress: bool = False) -> "RunHandle"
+         progress: bool = False,
+         wait_while_paused: bool = False) -> "RunHandle"
 ```
 
 Block until the current run reaches a target state. Returns a
 loaded :class:`RunHandle`, so chains like
 ``job.run.wait().download_to_dir(...)`` work cleanly.
 
-See ``ZenRowsBatchClient.wait_for_run`` for the full contract.
+A paused run raises :class:`RunPaused` instead of being polled
+until ``timeout``, unless ``wait_while_paused=True``. See
+``ZenRowsBatchClient.wait_for_run`` for the full contract.
 
 <a id="CurrentRun.results"></a>
 
@@ -1023,22 +1037,23 @@ Current-run per-attempt event log for one task.
 #### download\_to\_dir
 
 ```python
-def download_to_dir(target_dir: str | Path,
-                    *,
-                    status: str | None = "successful",
-                    name_fn: Callable[[TaskResult], str] | None = None,
-                    use_external_id: bool = False,
-                    concurrency: int = 1,
-                    progress: bool = False,
-                    max_files: int | None = None,
-                    max_bytes_per_file: int | None = None,
-                    skipped: list[TaskResult] | None = None) -> int
+def download_to_dir(
+        target_dir: str | Path,
+        *,
+        status: str | None = "successful",
+        name_fn: Callable[[TaskResult], str] | None = None,
+        use_external_id: bool = False,
+        concurrency: int = 1,
+        progress: bool = False,
+        max_files: int | None = None,
+        max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None) -> int
 ```
 
 Write every matching task's body to ``target_dir``, one file
 per task. Returns the number of files written. Failed and
-``expired`` rows have no body: they are skipped and appended to
-``skipped`` when you pass a list.
+``expired`` rows have no body: they are skipped and passed to
+``on_skip`` when you set it.
 
 <a id="CurrentRun.download_to_memory"></a>
 
@@ -1046,19 +1061,20 @@ per task. Returns the number of files written. Failed and
 
 ```python
 def download_to_memory(
-        *,
-        status: str | None = "successful",
-        concurrency: int = 1,
-        progress: bool = False,
-        max_count: int | None = None,
-        max_total_bytes: int | None = None,
-        max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None) -> "list[DownloadedResult]"
+    *,
+    status: str | None = "successful",
+    concurrency: int = 1,
+    progress: bool = False,
+    max_count: int | None = None,
+    max_total_bytes: int | None = None,
+    max_bytes_per_file: int | None = None,
+    on_skip: Callable[[TaskResult], None] | None = None
+) -> "list[DownloadedResult]"
 ```
 
 Load every matching task's body into memory. Failed and
-``expired`` rows have no body: they are skipped and appended to
-``skipped`` when you pass a list.
+``expired`` rows have no body: they are skipped and passed to
+``on_skip`` when you set it.
 
 <a id="CurrentRun.download_task_to_file"></a>
 
@@ -1498,6 +1514,22 @@ class WaiterError(RuntimeError)
 
 Raised when the resource entered a `failure_states` value.
 
+<a id="RunPaused"></a>
+
+## RunPaused Objects
+
+```python
+class RunPaused(WaiterError)
+```
+
+Raised by a run waiter when the run is paused
+(`pause_state: paused`) and not yet in a target status.
+
+A paused run makes no progress until someone resumes it, so the
+waiter stops at once instead of polling until its timeout. `run` is
+the run as last read. Resume it with `job.run.resume()` and wait
+again, or pass `wait_while_paused=True` to keep polling.
+
 <a id="poll_until"></a>
 
 #### poll\_until
@@ -1561,8 +1593,8 @@ minimal envs without a hard dep).
 Rows with no body to fetch are skipped by the bulk helpers: failed
 tasks, and successful tasks whose result is past the job's retention
 window (14 days by default), which the API returns as `expired` even
-under a `status="successful"` filter. Pass a list as `skipped=` to get
-those rows back; a WARNING on `zenrows.batch.download` gives the
+under a `status="successful"` filter. Pass `on_skip=` to be called
+with each of those rows; a WARNING on `zenrows.batch.download` gives the
 counts. Any other row without a `result_url` still raises, so a result
 never goes missing silently.
 
@@ -1604,25 +1636,26 @@ Raised when a download exceeds a configured cap.
 #### download\_to\_dir
 
 ```python
-def download_to_dir(client: _BodyFetcher,
-                    job_id: str,
-                    target_dir: Path,
-                    *,
-                    run_id: str | None = None,
-                    status: str | None = TaskStatus.SUCCESSFUL.value,
-                    name_fn: Callable[[TaskResult], str] | None = None,
-                    use_external_id: bool = False,
-                    concurrency: int = 1,
-                    progress: bool = False,
-                    max_files: int = DEFAULT_MAX_FILES,
-                    max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
-                    skipped: list[TaskResult] | None = None) -> int
+def download_to_dir(
+        client: _BodyFetcher,
+        job_id: str,
+        target_dir: Path,
+        *,
+        run_id: str | None = None,
+        status: str | None = TaskStatus.SUCCESSFUL.value,
+        name_fn: Callable[[TaskResult], str] | None = None,
+        use_external_id: bool = False,
+        concurrency: int = 1,
+        progress: bool = False,
+        max_files: int = DEFAULT_MAX_FILES,
+        max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
+        on_skip: Callable[[TaskResult], None] | None = None) -> int
 ```
 
 Stream every task's body into `target_dir`. Returns the count.
 
-Failed and `expired` rows have no body: they are skipped, appended
-to `skipped` when you pass a list, and don't count toward
+Failed and `expired` rows have no body: they are skipped, passed
+to `on_skip` when you set it, and don't count toward
 `max_files`.
 
 `concurrency` parallelises the body-fetch + write. With the
@@ -1665,23 +1698,24 @@ return the raw bytes.
 
 ```python
 def download_to_memory(
-        client: _BodyFetcher,
-        job_id: str,
-        *,
-        run_id: str | None = None,
-        status: str | None = TaskStatus.SUCCESSFUL.value,
-        concurrency: int = 1,
-        progress: bool = False,
-        max_count: int = DEFAULT_MAX_COUNT_IN_MEMORY,
-        max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY,
-        max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
-        skipped: list[TaskResult] | None = None) -> list[DownloadedResult]
+    client: _BodyFetcher,
+    job_id: str,
+    *,
+    run_id: str | None = None,
+    status: str | None = TaskStatus.SUCCESSFUL.value,
+    concurrency: int = 1,
+    progress: bool = False,
+    max_count: int = DEFAULT_MAX_COUNT_IN_MEMORY,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY,
+    max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
+    on_skip: Callable[[TaskResult], None] | None = None
+) -> list[DownloadedResult]
 ```
 
 Load every (matching) task body into a list and return it.
 
-Failed and `expired` rows have no body: they are skipped, appended
-to `skipped` when you pass a list, and don't count toward
+Failed and `expired` rows have no body: they are skipped, passed
+to `on_skip` when you set it, and don't count toward
 `max_count`.
 
 Three independent caps that all raise `DownloadLimitExceeded`:
@@ -1961,34 +1995,34 @@ The digest is HMAC-SHA256 over the bytes `<t>.<raw request body>`, keyed
 with your signing secret. The API returns that secret once, base64-encoded,
 from `rotate_hmac_key()`; `verify_webhook_signature` decodes it for you.
 
-    from zenrows.batch import SIGNATURE_HEADER, verify_webhook_signature
+    from zenrows.batch import WEBHOOK_SIGNATURE_HEADER, verify_webhook_signature
 
     ok = verify_webhook_signature(
         request.body,                       # raw bytes, before any JSON parsing
-        request.headers[SIGNATURE_HEADER],
+        request.headers[WEBHOOK_SIGNATURE_HEADER],
         {"<kid>": "<base64 secret>"},       # every key you may still receive
     )
 
 During a key rotation, keep both the old and the new secret in the
 mapping: the header's `kid` picks the one that signed. Deliveries can
 repeat, so deduplicate on the `X-ZenRows-Event-Id` header
-(`EVENT_ID_HEADER`).
+(`WEBHOOK_EVENT_ID_HEADER`).
 
-<a id="SIGNATURE_HEADER"></a>
+<a id="WEBHOOK_SIGNATURE_HEADER"></a>
 
-#### SIGNATURE\_HEADER
+#### WEBHOOK\_SIGNATURE\_HEADER
 
 The header that carries a signed delivery's signature.
 
-<a id="EVENT_ID_HEADER"></a>
+<a id="WEBHOOK_EVENT_ID_HEADER"></a>
 
-#### EVENT\_ID\_HEADER
+#### WEBHOOK\_EVENT\_ID\_HEADER
 
 The header that carries a delivery's event id. Deduplicate on it.
 
-<a id="DEFAULT_WEBHOOK_TOLERANCE"></a>
+<a id="DEFAULT_WEBHOOK_TOLERANCE_SECONDS"></a>
 
-#### DEFAULT\_WEBHOOK\_TOLERANCE
+#### DEFAULT\_WEBHOOK\_TOLERANCE\_SECONDS
 
 Seconds a signature's timestamp may be from the current time.
 
@@ -1997,12 +2031,13 @@ Seconds a signature's timestamp may be from the current time.
 #### verify\_webhook\_signature
 
 ```python
-def verify_webhook_signature(raw_body: bytes | str,
-                             signature_header: str,
-                             secrets: Mapping[str, str],
-                             *,
-                             tolerance: float = DEFAULT_WEBHOOK_TOLERANCE,
-                             now: float | None = None) -> bool
+def verify_webhook_signature(
+        raw_body: bytes | str,
+        signature_header: str,
+        secrets: Mapping[str, str],
+        *,
+        tolerance_seconds: float = DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+        now: float | None = None) -> bool
 ```
 
 Return True when `signature_header` is a valid signature of `raw_body`.
@@ -2013,7 +2048,7 @@ Return True when `signature_header` is a valid signature of `raw_body`.
 - `secrets`: maps each key id (`kid`) to its secret as the API
   returned it: a base64 string that decodes to 32 bytes. Any other
   secret, including an empty one, never verifies.
-- `tolerance`: the largest accepted gap, in seconds, between the
+- `tolerance_seconds`: the largest accepted gap, in seconds, between the
   signature's timestamp and `now`, in either direction. `0` turns
   the check off; a negative value rejects every delivery.
 - `now`: the current Unix time in seconds (default: `time.time()`).
@@ -2485,6 +2520,18 @@ Indicative `{credits, cost}` pair — what was charged for
 the scoped work. **Not billing-grade**; your account
 statement is authoritative. Use as a "how much did this
 cost?" indicator, not for reconciliation.
+
+<a id="TaskSpend"></a>
+
+## TaskSpend Objects
+
+```python
+class TaskSpend(BaseModel)
+```
+
+Deprecated: result rows never carry a per-task spend, so this
+model is never filled. Kept so existing imports keep working.
+Read the run-level `stats.spend` instead.
 
 <a id="RunStats"></a>
 
@@ -3312,6 +3359,14 @@ never re-executed, and its `result_url` resolves to the
 source run's stored result. On chained retries,
 `source_run_id` chases back to the run that actually
 owns the result. Empty for normally-executed rows.
+
+<a id="TaskResult.spend"></a>
+
+#### spend
+
+Deprecated: result rows never carry a per-task spend, so
+this is always empty. Read the run-level `stats.spend`
+instead.
 
 <a id="TaskResult.created_at"></a>
 

@@ -1551,6 +1551,18 @@ components:
         credits: { type: integer, minimum: 0 }
         cost: { type: number, format: double, minimum: 0 }
 
+    TaskSpend:
+      type: object
+      deprecated: true
+      description: |
+        Deprecated: result rows never carry a per-task spend, so this
+        model is never filled. Kept so existing imports keep working.
+        Read the run-level `stats.spend` instead.
+      required: [total, last_attempt]
+      properties:
+        total: { $ref: '#/components/schemas/Spend' }
+        last_attempt: { $ref: '#/components/schemas/Spend' }
+
     RunStats:
       type: object
       required: [total, completed, successful, failed]
@@ -1889,6 +1901,12 @@ components:
             source run's stored result. On chained retries,
             `source_run_id` chases back to the run that actually
             owns the result. Empty for normally-executed rows.
+        spend:
+          $ref: '#/components/schemas/TaskSpend'
+          description: |
+            Deprecated: result rows never carry a per-task spend, so
+            this is always empty. Read the run-level `stats.spend`
+            instead.
         created_at:
           type: string
           format: date-time

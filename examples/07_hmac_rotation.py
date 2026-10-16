@@ -54,7 +54,7 @@ def main() -> None:
         raise
 
     # Your receiver checks deliveries with every key it may still see:
-    #   verify_webhook_signature(raw_body, headers[SIGNATURE_HEADER],
+    #   verify_webhook_signature(raw_body, headers[WEBHOOK_SIGNATURE_HEADER],
     #                            {old_kid: old_secret, rotated.kid: rotated.secret})
     # Once your verifiers accept the new key, promote it:
     # client.finalize_hmac_key()

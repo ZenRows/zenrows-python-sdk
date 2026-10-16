@@ -25,7 +25,7 @@ Highlights:
     `status=None` to grab everything.
   - Results are kept for 14 days by default. After that a successful
     task reads as `expired` and has no body; the download skips it
-    (and any failed row) and hands it back in `skipped=`.
+    (and any failed row) and passes it to `on_skip=`.
 
 Run with:
     export ZENROWS_API_KEY=zr_...
@@ -72,7 +72,7 @@ def main() -> None:
             progress=True,  # live tqdm bar
             max_files=20_000,  # cap row count
             max_bytes_per_file=10 * 1024 * 1024,  # cap single body @ 10 MiB
-            skipped=skipped,  # expired or failed rows, which have no body
+            on_skip=skipped.append,  # expired or failed rows, which have no body
         )
         print(f"wrote {written} files to {args.out}/ ({len(skipped)} skipped)")
     except DownloadLimitExceeded as exc:

@@ -10,9 +10,9 @@ import hmac
 import pytest
 
 from zenrows.batch import (
-    DEFAULT_WEBHOOK_TOLERANCE,
-    EVENT_ID_HEADER,
-    SIGNATURE_HEADER,
+    DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+    WEBHOOK_EVENT_ID_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
     WebhookEvent,
     WebhookEventType,
     verify_webhook_signature,
@@ -75,16 +75,16 @@ def test_kid_selects_the_secret_during_rotation():
 
 def test_tolerance():
     secrets = {"kid_live": SECRET}
-    assert DEFAULT_WEBHOOK_TOLERANCE == 300
+    assert DEFAULT_WEBHOOK_TOLERANCE_SECONDS == 300
     assert verify_webhook_signature(BODY, HEADER, secrets, now=T + 300)
     assert verify_webhook_signature(BODY, HEADER, secrets, now=T - 300)
     assert not verify_webhook_signature(BODY, HEADER, secrets, now=T + 301)
     assert not verify_webhook_signature(BODY, HEADER, secrets, now=T - 301)
-    assert verify_webhook_signature(BODY, HEADER, secrets, tolerance=60, now=T + 60)
-    assert not verify_webhook_signature(BODY, HEADER, secrets, tolerance=60, now=T + 61)
+    assert verify_webhook_signature(BODY, HEADER, secrets, tolerance_seconds=60, now=T + 60)
+    assert not verify_webhook_signature(BODY, HEADER, secrets, tolerance_seconds=60, now=T + 61)
     # 0 turns the check off; a negative tolerance rejects everything.
-    assert verify_webhook_signature(BODY, HEADER, secrets, tolerance=0, now=T + 10**6)
-    assert not verify_webhook_signature(BODY, HEADER, secrets, tolerance=-1, now=T)
+    assert verify_webhook_signature(BODY, HEADER, secrets, tolerance_seconds=0, now=T + 10**6)
+    assert not verify_webhook_signature(BODY, HEADER, secrets, tolerance_seconds=-1, now=T)
     # Default `now` is the real clock, far past T.
     assert not verify_webhook_signature(BODY, HEADER, secrets)
 
@@ -125,8 +125,8 @@ def test_wrong_argument_types_return_false():
 
 
 def test_header_names_and_payload_model():
-    assert SIGNATURE_HEADER == "X-Signature"
-    assert EVENT_ID_HEADER == "X-ZenRows-Event-Id"
+    assert WEBHOOK_SIGNATURE_HEADER == "X-Signature"
+    assert WEBHOOK_EVENT_ID_HEADER == "X-ZenRows-Event-Id"
     event = WebhookEvent.model_validate_json(BODY)
     assert event.event_type is WebhookEventType.RUN_COMPLETED
     assert event.run_sequence == 1

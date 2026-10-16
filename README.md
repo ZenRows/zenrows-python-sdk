@@ -245,6 +245,12 @@ count = run.download_to_dir("./out")
 print(f"downloaded {count} results to ./out/")
 ```
 
+`run.wait()` returns once the run is terminal (`completed`, `stopped` or
+`failed`; read `failure_reason` on a failed run). A paused run never
+progresses, so the waiter raises `RunPaused` (carrying the run) instead
+of polling until its timeout; pass `wait_while_paused=True` to keep
+polling.
+
 > Need full control over the request body? `client.submit_job({...})` accepts a raw dict (the
 > wire shape) or a typed `SubmitJobRequest`, and returns the same `JobRef`.
 
@@ -396,14 +402,14 @@ run.download_all_results("results.zip")
 a successful task reads as `expired`, has no `result_url`, and still
 matches `status="successful"`. The bulk helpers skip such rows (and
 failed ones) instead of stopping, log a WARNING on
-`zenrows.batch.download` with the counts, and hand them back if you
-pass a list:
+`zenrows.batch.download` with the counts, and pass each one to
+`on_skip` if you set it:
 
 ```python
 from zenrows.batch import TaskStatus
 
 skipped = []
-run.download_to_dir("./out", skipped=skipped)
+run.download_to_dir("./out", on_skip=skipped.append)
 expired = [r for r in skipped if r.status is TaskStatus.EXPIRED]
 ```
 
@@ -475,7 +481,7 @@ recomputes HMAC-SHA256 over `<t>.<raw body>`, compares in constant time
 and rejects timestamps more than 5 minutes off.
 
 ```python
-from zenrows.batch import SIGNATURE_HEADER, WebhookEvent, verify_webhook_signature
+from zenrows.batch import WEBHOOK_SIGNATURE_HEADER, WebhookEvent, verify_webhook_signature
 
 client.submit_regular(
     ["https://example.com/a"],
@@ -488,7 +494,7 @@ SECRETS = {"<kid>": "<secret>"}
 
 def receive(raw_body: bytes, headers) -> int:
     # Verify the raw bytes before parsing them.
-    if not verify_webhook_signature(raw_body, headers[SIGNATURE_HEADER], SECRETS):
+    if not verify_webhook_signature(raw_body, headers[WEBHOOK_SIGNATURE_HEADER], SECRETS):
         return 401
     event = WebhookEvent.model_validate_json(raw_body)
     print(event.event_type, event.job_id, event.run_id)

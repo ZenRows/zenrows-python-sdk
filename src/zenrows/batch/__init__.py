@@ -53,11 +53,11 @@ from zenrows.batch._typed_dicts import (
     TaskInputDict,
     WebhookDict,
 )
-from zenrows.batch._waiters import WaiterError, WaiterTimeout
+from zenrows.batch._waiters import RunPaused, WaiterError, WaiterTimeout
 from zenrows.batch._webhooks import (
-    DEFAULT_WEBHOOK_TOLERANCE,
-    EVENT_ID_HEADER,
-    SIGNATURE_HEADER,
+    DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+    WEBHOOK_EVENT_ID_HEADER,
+    WEBHOOK_SIGNATURE_HEADER,
     verify_webhook_signature,
 )
 from zenrows.batch.client import TERMINAL_RUN_STATUSES, ZenRowsBatchClient
@@ -85,10 +85,10 @@ from zenrows.batch.models import (
 )
 
 __all__ = [
-    "DEFAULT_WEBHOOK_TOLERANCE",
-    "EVENT_ID_HEADER",
-    "SIGNATURE_HEADER",
+    "DEFAULT_WEBHOOK_TOLERANCE_SECONDS",
     "TERMINAL_RUN_STATUSES",
+    "WEBHOOK_EVENT_ID_HEADER",
+    "WEBHOOK_SIGNATURE_HEADER",
     "AddTasksDict",
     "AddTasksRequest",
     "At",
@@ -121,6 +121,7 @@ __all__ = [
     "Rate",
     "Run",
     "RunHandle",
+    "RunPaused",
     "RunRef",
     "RunStatus",
     "Schedule",

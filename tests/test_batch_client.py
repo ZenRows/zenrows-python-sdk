@@ -1201,7 +1201,7 @@ def test_task_status_expired_and_run_trigger_parse():
     row = _task_result("T1", status="expired")
     assert row.status is TaskStatus.EXPIRED
     assert row.result_url is None
-    assert not hasattr(row, "spend")  # result rows carry no per-task spend
+    assert row.spend is None  # result rows carry no per-task spend
 
     run = Run.model_validate(
         {
@@ -1246,7 +1246,7 @@ def test_download_to_dir_skips_expired_and_failed_rows(
 
     skipped: list[TaskResult] = []
     with caplog.at_level("WARNING", logger="zenrows.batch.download"):
-        n = client.run("J", "R").download_to_dir(tmp_path, status=None, skipped=skipped)
+        n = client.run("J", "R").download_to_dir(tmp_path, status=None, on_skip=skipped.append)
 
     assert n == 1
     assert (tmp_path / "T1.html").read_bytes() == b"ok"
@@ -1275,7 +1275,9 @@ def test_download_to_memory_skips_expired_rows_concurrently(client: ZenRowsBatch
     )
 
     skipped: list[TaskResult] = []
-    out = client.run("J", "R").download_to_memory(concurrency=4, max_count=3, skipped=skipped)
+    out = client.run("J", "R").download_to_memory(
+        concurrency=4, max_count=3, on_skip=skipped.append
+    )
 
     assert sorted(r.task_id for r in out) == ["T0", "T1", "T2"]
     assert len(skipped) == 5
@@ -1396,3 +1398,72 @@ def test_batch_error_code_names_every_api_code():
     err = BatchAPIError(410, None, b"")
     err.code = "result_expired"
     assert err.code == BatchErrorCode.RESULT_EXPIRED
+
+
+# ===== waiters on a paused run =====
+
+
+@pytest.fixture
+def no_poll_sleep(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr("zenrows.batch._waiters.time.sleep", slept.append)
+    return slept
+
+
+@respx.mock
+def test_wait_raises_run_paused_instead_of_spinning(client: ZenRowsBatchClient, no_poll_sleep):
+    """A paused run never progresses: the waiter raises `RunPaused` on the
+    first poll that sees it, carrying the run."""
+    from zenrows.batch import RunPaused, WaiterError
+
+    route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_run_json(pause_state="paused"))
+    )
+
+    with pytest.raises(RunPaused) as exc:
+        client.run("J", "R").wait(timeout=600)
+
+    assert isinstance(exc.value, WaiterError)
+    assert exc.value.run.run_id == "R"
+    assert route.call_count == 1
+    assert no_poll_sleep == []
+
+
+@respx.mock
+def test_current_run_wait_raises_run_paused(client: ZenRowsBatchClient, no_poll_sleep):
+    from zenrows.batch import RunPaused
+
+    job = _ingest_job_json("done")
+    job["latest_run"] = _run_json(pause_state="paused")
+    respx.get(f"{BASE_URL}/jobs/J").mock(return_value=Response(200, json=job))
+
+    with pytest.raises(RunPaused):
+        client.job("J").run.wait()
+
+
+@respx.mock
+def test_wait_returns_a_paused_run_that_is_already_terminal(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """A run stopped while paused is terminal: it is returned, not raised."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_run_json(status="stopped", pause_state="paused"))
+    )
+    run = client.run("J", "R").wait()
+    assert run.data.status.value == "stopped"
+
+
+@respx.mock
+def test_wait_while_paused_keeps_polling(client: ZenRowsBatchClient, no_poll_sleep):
+    route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_run_json(pause_state="paused")),
+            Response(200, json=_run_json(pause_state="active")),
+            Response(200, json=_run_json(status="completed")),
+        ]
+    )
+
+    run = client.wait_for_run("J", run_id="R", wait_while_paused=True)
+
+    assert run.status.value == "completed"
+    assert route.call_count == 3

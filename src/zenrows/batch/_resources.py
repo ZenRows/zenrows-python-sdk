@@ -128,12 +128,12 @@ class RunRef:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
         """Write every matching task's body to ``target_dir``, one file
         per task. Returns the number of files written. Failed and
-        ``expired`` rows have no body: they are skipped and appended to
-        ``skipped`` when you pass a list."""
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_dir(
             self.job_id,
             self.run_id,
@@ -145,7 +145,7 @@ class RunRef:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
     def download_to_memory(
@@ -157,11 +157,11 @@ class RunRef:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> "list[DownloadedResult]":
         """Load every matching task's body into memory. Failed and
-        ``expired`` rows have no body: they are skipped and appended to
-        ``skipped`` when you pass a list."""
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_memory(
             self.job_id,
             self.run_id,
@@ -171,7 +171,7 @@ class RunRef:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
     # ----- single-task download -----
@@ -197,10 +197,13 @@ class RunRef:
         timeout: float = 300.0,
         poll_interval: float = 2.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> "RunHandle":
         """Block until this run reaches a target state. Returns a fresh
         loaded :class:`RunHandle` so chains like
-        ``run.wait().download_to_dir(...)`` work without re-wrapping."""
+        ``run.wait().download_to_dir(...)`` work without re-wrapping.
+        A paused run raises :class:`RunPaused` unless
+        ``wait_while_paused=True``."""
         run = self._client._wait_for_run_raw(
             self.job_id,
             run_id=self.run_id,
@@ -209,6 +212,7 @@ class RunRef:
             timeout=timeout,
             poll_interval=poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
         return RunHandle(self._client, self.job_id, self.run_id, run)
 
@@ -497,12 +501,15 @@ class CurrentRun:
         timeout: float = 300.0,
         poll_interval: float = 2.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> "RunHandle":
         """Block until the current run reaches a target state. Returns a
         loaded :class:`RunHandle`, so chains like
         ``job.run.wait().download_to_dir(...)`` work cleanly.
 
-        See ``ZenRowsBatchClient.wait_for_run`` for the full contract."""
+        A paused run raises :class:`RunPaused` instead of being polled
+        until ``timeout``, unless ``wait_while_paused=True``. See
+        ``ZenRowsBatchClient.wait_for_run`` for the full contract."""
         run = self._client._wait_for_run_raw(
             self.job_id,
             run_id=None,
@@ -511,6 +518,7 @@ class CurrentRun:
             timeout=timeout,
             poll_interval=poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
         return RunHandle(self._client, self.job_id, run.run_id, run)
 
@@ -537,12 +545,12 @@ class CurrentRun:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
         """Write every matching task's body to ``target_dir``, one file
         per task. Returns the number of files written. Failed and
-        ``expired`` rows have no body: they are skipped and appended to
-        ``skipped`` when you pass a list."""
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_dir(
             self.job_id,
             None,
@@ -554,7 +562,7 @@ class CurrentRun:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
     def download_to_memory(
@@ -566,11 +574,11 @@ class CurrentRun:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
-        skipped: list[TaskResult] | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> "list[DownloadedResult]":
         """Load every matching task's body into memory. Failed and
-        ``expired`` rows have no body: they are skipped and appended to
-        ``skipped`` when you pass a list."""
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_memory(
             self.job_id,
             None,
@@ -580,7 +588,7 @@ class CurrentRun:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
-            skipped=skipped,
+            on_skip=on_skip,
         )
 
     # ----- single-task download -----

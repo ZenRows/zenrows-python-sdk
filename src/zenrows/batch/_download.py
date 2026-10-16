@@ -32,8 +32,8 @@ minimal envs without a hard dep).
 Rows with no body to fetch are skipped by the bulk helpers: failed
 tasks, and successful tasks whose result is past the job's retention
 window (14 days by default), which the API returns as `expired` even
-under a `status="successful"` filter. Pass a list as `skipped=` to get
-those rows back; a WARNING on `zenrows.batch.download` gives the
+under a `status="successful"` filter. Pass `on_skip=` to be called
+with each of those rows; a WARNING on `zenrows.batch.download` gives the
 counts. Any other row without a `result_url` still raises, so a result
 never goes missing silently.
 """
@@ -122,12 +122,12 @@ def download_to_dir(
     progress: bool = False,
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
-    skipped: list[TaskResult] | None = None,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> int:
     """Stream every task's body into `target_dir`. Returns the count.
 
-    Failed and `expired` rows have no body: they are skipped, appended
-    to `skipped` when you pass a list, and don't count toward
+    Failed and `expired` rows have no body: they are skipped, passed
+    to `on_skip` when you set it, and don't count toward
     `max_files`.
 
     `concurrency` parallelises the body-fetch + write. With the
@@ -174,7 +174,7 @@ def download_to_dir(
         max_rows=max_files,
         max_rows_limit_name="max_files",
         progress_description="downloading to disk",
-        skipped=skipped,
+        on_skip=on_skip,
     )
 
 
@@ -309,12 +309,12 @@ def download_to_memory(
     max_count: int = DEFAULT_MAX_COUNT_IN_MEMORY,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY,
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
-    skipped: list[TaskResult] | None = None,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> list[DownloadedResult]:
     """Load every (matching) task body into a list and return it.
 
-    Failed and `expired` rows have no body: they are skipped, appended
-    to `skipped` when you pass a list, and don't count toward
+    Failed and `expired` rows have no body: they are skipped, passed
+    to `on_skip` when you set it, and don't count toward
     `max_count`.
 
     Three independent caps that all raise `DownloadLimitExceeded`:
@@ -356,7 +356,7 @@ def download_to_memory(
         max_rows=max_count,
         max_rows_limit_name="max_count",
         progress_description="downloading to memory",
-        skipped=skipped,
+        on_skip=on_skip,
     )
     return out
 
@@ -376,7 +376,7 @@ def _run_bulk(
     max_rows: int,
     max_rows_limit_name: str,
     progress_description: str,
-    skipped: list[TaskResult] | None = None,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> int:
     """Iterate results + apply `per_row` to each, with optional
     parallelism + progress bar.
@@ -390,7 +390,7 @@ def _run_bulk(
     counts: dict[str, int] = {}
     rows = _with_bodies(
         client._iter_results_raw(job_id, run_id=run_id, status=status),
-        skipped=skipped,
+        on_skip=on_skip,
         counts=counts,
     )
     try:
@@ -416,18 +416,19 @@ def _run_bulk(
 def _with_bodies(
     rows: Iterable[TaskResult],
     *,
-    skipped: list[TaskResult] | None,
+    on_skip: Callable[[TaskResult], None] | None,
     counts: dict[str, int],
 ) -> Iterator[TaskResult]:
     """Drop the rows that have no body: no `result_url` and a status of
-    `failed` or `expired`. Each one is appended to `skipped` (when set)
+    `failed` or `expired`. Each one is passed to `on_skip` (when set)
     and counted per status in `counts`. Every other row passes through,
     so a `successful` row without a URL still fails loudly in the fetch.
-    Runs on the iterating thread, so the appends need no lock."""
+    Runs on the iterating thread, so `on_skip` is never called
+    concurrently."""
     for row in rows:
         if not row.result_url and row.status in _NO_BODY_STATUSES:
-            if skipped is not None:
-                skipped.append(row)
+            if on_skip is not None:
+                on_skip(row)
             counts[row.status.value] = counts.get(row.status.value, 0) + 1
             continue
         yield row
