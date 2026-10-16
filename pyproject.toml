@@ -28,6 +28,9 @@ requires-python = ">=3.10"
 dependencies = [
     # Legacy scraping client (zenrows.ZenRowsClient).
     "requests>=2.31",
+    # The client's retry policy subclasses urllib3's Retry; `allowed_methods`
+    # needs 1.26.
+    "urllib3>=1.26",
     # Batch (zenrows.batch) — pydantic v2 models + httpx transport.
     "httpx>=0.27",
     "pydantic>=2.9",

@@ -1,114 +1,442 @@
-import asyncio
-from unittest import TestCase
-from unittest.mock import patch
+"""The ZenRowsClient retry policy, end to end against a local HTTP server.
 
-from requests import Response, Session
+Retried: 429, 502, 503, 504 and a failure to connect. Never retried: any
+other status (422 included) or a read timeout. Waits honour `Retry-After`
+(capped at `retry_max_wait`) or else use full jitter, and no retry starts
+past `retry_budget`. Sleeps are patched out; the budget runs on a fake clock.
+"""
+
+import asyncio
+import socket
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+import requests
+from requests.adapters import HTTPAdapter
 
 from zenrows import ZenRowsClient, is_no_data_extracted
-from zenrows.client import _RETRY_STATUSES
+from zenrows.client import _JitteredRetry
 
-apikey = "APIKEY"
-url = "http://example.com"
-api_url_base = "https://api.zenrows.com/v1/"
+APIKEY = "APIKEY"
+TARGET = "http://example.com"
 
+NO_DATA = b'{"code": "no_data_extracted", "title": "No data extracted"}'
+NO_CONTENT = b'{"code": "RESP001", "title": "Could not get content"}'
+DOMAIN_NOT_PREPARED = b'{"code": "REQS007", "title": "Domain not prepared"}'
 
-class TestZenRowsClientRetries(TestCase):
-    @patch("zenrows.client.Retry")
-    @patch.object(Session, "mount")
-    def test_custom_session_not_initiated(self, mock_mount, mock_retry):
-        ZenRowsClient(apikey, retries=0)
-
-        mock_retry.assert_not_called()
-        self.assertEqual(mock_mount.call_count, 2)  # called internally
-
-    @patch("zenrows.client.Retry")
-    def test_retry_parameters(self, mock_retry):
-        ZenRowsClient(apikey, retries=2)
-
-        mock_retry.assert_called_once_with(
-            total=2,
-            backoff_factor=0.5,
-            status_forcelist=list(_RETRY_STATUSES),
-            raise_on_status=False,
-        )
-
-    @patch.object(Session, "mount")
-    def test_adapter_is_mount(self, mock_mount):
-        ZenRowsClient(apikey, retries=2)
-
-        self.assertEqual(mock_mount.call_count, 4)
+# A scripted response: (status, headers, body). HANG answers only after the
+# client's read timeout has passed.
+HANG = (0, {}, b"")
 
 
-def _fake_response(status_code: int, body: bytes = b"") -> Response:
-    response = Response()
+class _Server:
+    """Answers each request with the next scripted response (the last one
+    repeats) and records the query of every request it got."""
+
+    def __init__(self) -> None:
+        self.script: list[tuple[int, dict[str, str], bytes]] = [(200, {}, b"ok")]
+        self.queries: list[dict[str, list[str]]] = []
+        self.on_request = lambda: None
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _answer(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length:
+                    self.rfile.read(length)
+                server.queries.append(parse_qs(urlparse(self.path).query))
+                server.on_request()
+                status, headers, body = (
+                    server.script.pop(0) if len(server.script) > 1 else server.script[0]
+                )
+                if status == 0:
+                    threading.Event().wait(0.5)  # not time.sleep: tests patch it
+                    status = 200
+                try:
+                    self.send_response(status)
+                    for name, value in headers.items():
+                        self.send_header(name, value)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except OSError:
+                    pass  # the client gave up first
+
+            do_GET = do_POST = _answer
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/"
+        threading.Thread(
+            target=self.httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+        ).start()
+
+    @property
+    def calls(self) -> int:
+        return len(self.queries)
+
+    def close(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def server() -> Iterator[_Server]:
+    srv = _Server()
+    yield srv
+    srv.close()
+
+
+@pytest.fixture
+def sleeps() -> Iterator[list[float]]:
+    """Every wait between tries, in seconds; none of them actually waits."""
+    waited: list[float] = []
+    with patch("urllib3.util.retry.time.sleep", side_effect=waited.append):
+        yield waited
+
+
+def client(server: _Server, **kwargs) -> ZenRowsClient:
+    return ZenRowsClient(APIKEY, base_url=server.url, **kwargs)
+
+
+# ---- configuration ----
+
+
+def test_default_is_two_retries() -> None:
+    zr = ZenRowsClient(APIKEY)
+
+    retry = zr.requests_session.get_adapter("https://api.zenrows.com/v1/").max_retries
+    assert zr.retries == 2
+    assert isinstance(retry, _JitteredRetry)
+    assert (retry.total, retry.status, retry.connect, retry.other) == (2, 2, 2, 0)
+    assert retry.read is False
+    assert retry.allowed_methods is None
+    assert set(retry.status_forcelist) == {429, 502, 503, 504}
+    assert (retry.retry_max_wait, retry.retry_budget) == (30.0, 90.0)
+
+
+def test_retries_zero_mounts_no_retry(server: _Server, sleeps: list[float]) -> None:
+    zr = client(server, retries=0)
+    server.script = [(503, {}, b"")]
+
+    response = zr.fetch(TARGET)
+
+    assert type(zr.requests_session.get_adapter(server.url)) is HTTPAdapter
+    assert response.status_code == 503
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_default_retries_twice_then_returns_the_last_response(
+    server: _Server, sleeps: list[float]
+) -> None:
+    server.script = [(503, {}, b"")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 503
+    assert server.calls == 3
+    assert len(sleeps) == 2
+
+
+# ---- what is retried ----
+
+
+@pytest.mark.parametrize("status", [429, 502, 503, 504])
+def test_retryable_status_is_retried_until_success(
+    server: _Server, sleeps: list[float], status: int
+) -> None:
+    server.script = [(status, {}, b""), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 200
+    assert response.text == "ok"
+    assert server.calls == 2
+
+
+def test_post_is_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {}, b""), (200, {}, b"ok")]
+
+    response = client(server).post(TARGET, data="payload")
+
+    assert response.status_code == 200
+    assert server.calls == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(400, b""), (401, b""), (404, b""), (422, NO_CONTENT), (422, NO_DATA), (500, b"")],
+)
+def test_other_statuses_are_not_retried(
+    server: _Server, sleeps: list[float], status: int, body: bytes
+) -> None:
+    server.script = [(status, {}, body)]
+
+    response = client(server, retries=3).fetch(TARGET)
+
+    assert response.status_code == status
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_413_with_retry_after_is_not_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(413, {"Retry-After": "1"}, b"")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 413
+    assert server.calls == 1
+
+
+def test_read_timeout_is_not_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [HANG]
+
+    with pytest.raises(requests.exceptions.ReadTimeout):
+        client(server, retries=3).fetch(TARGET, timeout=0.1)
+
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_connection_refused_is_retried(sleeps: list[float]) -> None:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]  # closed once the block ends: nothing listens
+
+    zr = ZenRowsClient(APIKEY, base_url=f"http://127.0.0.1:{port}/")
+    with pytest.raises(requests.exceptions.ConnectionError):
+        zr.fetch(TARGET)
+
+    assert len(sleeps) == 2
+
+
+# ---- how long it waits ----
+
+
+def test_jitter_draws_between_quarter_second_and_doubling_ceiling(
+    server: _Server, sleeps: list[float]
+) -> None:
+    server.script = [(503, {}, b"")] * 4 + [(200, {}, b"ok")]
+
+    with patch("zenrows.client.random.uniform", side_effect=lambda lo, hi: hi) as uniform:
+        response = client(server, retries=4).fetch(TARGET)
+
+    assert response.status_code == 200
+    assert [c.args for c in uniform.call_args_list] == [
+        (0.25, 1.0),
+        (0.25, 2.0),
+        (0.25, 4.0),
+        (0.25, 8.0),
+    ]
+    assert sleeps == [1.0, 2.0, 4.0, 8.0]
+
+
+def test_jitter_stays_in_bounds(server: _Server, sleeps: list[float]) -> None:
+    for _ in range(20):
+        sleeps.clear()
+        server.script = [(503, {}, b"")] * 3 + [(200, {}, b"ok")]
+        client(server, retries=3).fetch(TARGET)
+        assert len(sleeps) == 3
+        for attempt, waited in enumerate(sleeps):
+            assert 0.25 <= waited <= 2.0**attempt
+
+
+def test_retry_max_wait_caps_the_jitter() -> None:
+    retry = _JitteredRetry(total=10, retry_max_wait=3.0)
+    for _ in range(6):
+        retry = retry.new(history=(*retry.history, None))
+
+    with patch("zenrows.client.random.uniform", side_effect=lambda lo, hi: (lo, hi)):
+        assert retry.get_backoff_time() == (0.25, 3.0)
+
+
+def test_retry_after_is_honoured(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {"Retry-After": "7"}, b""), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 200
+    assert sleeps == [7.0]
+
+
+def test_retry_after_is_capped_at_30_seconds(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(429, {"Retry-After": "120"}, b""), (200, {}, b"ok")]
+
+    client(server).fetch(TARGET)
+
+    assert sleeps == [30.0]
+
+
+def test_retry_after_is_capped_at_retry_max_wait(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {"Retry-After": "20"}, b""), (200, {}, b"ok")]
+
+    client(server, retry_max_wait=5.0).fetch(TARGET)
+
+    assert sleeps == [5.0]
+
+
+def test_unparseable_retry_after_falls_back_to_jitter(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {"Retry-After": "soon"}, b""), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 200
+    assert len(sleeps) == 1
+    assert 0.25 <= sleeps[0] <= 1.0
+
+
+# ---- the retry budget ----
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock() -> Iterator[tuple[_Clock, list[float]]]:
+    """A fake clock for the retry budget, moved on by every wait, and the
+    list of those waits."""
+    fake = _Clock()
+    waited: list[float] = []
+
+    def wait(seconds: float) -> None:
+        waited.append(seconds)
+        fake.now += seconds
+
+    with (
+        patch("zenrows.client._monotonic", fake),
+        patch("urllib3.util.retry.time.sleep", side_effect=wait),
+    ):
+        yield fake, waited
+
+
+def test_no_retry_starts_past_the_budget(
+    server: _Server, clock: tuple[_Clock, list[float]]
+) -> None:
+    _, sleeps = clock
+    server.script = [(503, {"Retry-After": "20"}, b"")]
+
+    response = client(server, retries=10).fetch(TARGET)
+
+    # Waits end at 20, 40, 60, 80 s; a fifth would end at 100 s > 90 s.
+    assert response.status_code == 503
+    assert sleeps == [20.0, 20.0, 20.0, 20.0]
+    assert server.calls == 5
+
+
+def test_budget_counts_the_first_try(server: _Server, clock: tuple[_Clock, list[float]]) -> None:
+    fake, sleeps = clock
+    server.script = [(503, {"Retry-After": "10"}, b"")]
+
+    def slow_first_try() -> None:
+        if server.calls == 1:
+            fake.now += 85.0
+
+    server.on_request = slow_first_try
+
+    response = client(server).fetch(TARGET)
+
+    # 85 s spent + a 10 s wait would end past 90 s.
+    assert response.status_code == 503
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_budget_is_per_call(server: _Server, clock: tuple[_Clock, list[float]]) -> None:
+    _, sleeps = clock
+    zr = client(server, retries=1)
+    for _ in range(4):
+        server.script = [(503, {"Retry-After": "30"}, b""), (200, {}, b"ok")]
+        assert zr.fetch(TARGET).status_code == 200
+
+    assert sleeps == [30.0] * 4
+
+
+def test_custom_budget(server: _Server, clock: tuple[_Clock, list[float]]) -> None:
+    _, sleeps = clock
+    server.script = [(503, {"Retry-After": "10"}, b"")]
+
+    response = client(server, retry_budget=5.0).fetch(TARGET)
+
+    assert response.status_code == 503
+    assert server.calls == 1
+    assert sleeps == []
+
+
+# ---- Extract ----
+
+
+def test_no_data_extracted_is_not_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(422, {}, NO_DATA)]
+
+    response = client(server, retries=3).extract(TARGET)
+
+    assert is_no_data_extracted(response)
+    assert server.calls == 1
+
+
+def test_autoparse_fallback_is_unchanged(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
+
+    response = client(server).extract(TARGET)
+
+    assert response.status_code == 200
+    assert server.calls == 2
+    assert server.queries[0]["extract"] == ["auto"]
+    assert server.queries[1]["autoparse"] == ["True"]
+    assert "extract" not in server.queries[1]
+    assert sleeps == []
+
+
+def test_autoparse_fallback_is_unchanged_async(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
+
+    response = asyncio.run(client(server).extract_async(TARGET))
+
+    assert response.status_code == 200
+    assert server.calls == 2
+    assert server.queries[1]["autoparse"] == ["True"]
+
+
+def test_extract_retries_a_503_before_the_fallback(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {}, b""), (403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
+
+    response = client(server).extract(TARGET)
+
+    assert response.status_code == 200
+    assert server.calls == 3
+    assert len(sleeps) == 1
+    assert server.queries[2]["autoparse"] == ["True"]
+
+
+# ---- is_no_data_extracted ----
+
+
+def _fake_response(status_code: int, body: bytes = b"") -> requests.Response:
+    response = requests.Response()
     response.status_code = status_code
     response._content = body
     return response
 
 
-NO_DATA = b'{"code": "no_data_extracted", "title": "No data extracted"}'
-NO_CONTENT = b'{"code": "RESP001", "title": "Could not get content"}'
+def test_is_no_data_extracted_matches_any_case() -> None:
+    assert is_no_data_extracted(_fake_response(422, NO_DATA))
+    assert is_no_data_extracted(_fake_response(422, b'{"code": "NO_DATA_EXTRACTED"}'))
 
 
-@patch("zenrows.client.time.sleep")
-class TestUnprocessableRetries(TestCase):
-    """A 422 is retried in the client, not in urllib3, because only the body
-    says whether another try can help."""
-
-    @patch.object(Session, "request")
-    def test_no_data_extracted_is_not_retried(self, mock_request, mock_sleep):
-        mock_request.return_value = _fake_response(422, NO_DATA)
-
-        response = ZenRowsClient(apikey, retries=3).extract(url)
-
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(mock_request.call_count, 1)
-        mock_sleep.assert_not_called()
-
-    @patch.object(Session, "request")
-    def test_other_422_is_retried_up_to_retries(self, mock_request, mock_sleep):
-        mock_request.return_value = _fake_response(422, NO_CONTENT)
-
-        response = ZenRowsClient(apikey, retries=3).fetch(url)
-
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(mock_request.call_count, 4)  # 1 + 3 retries
-        self.assertEqual([c.args[0] for c in mock_sleep.call_args_list], [1.0, 2.0])
-
-    @patch.object(Session, "request")
-    def test_other_422_stops_retrying_on_success(self, mock_request, mock_sleep):
-        mock_request.side_effect = [_fake_response(422, NO_CONTENT), _fake_response(200, b"ok")]
-
-        response = ZenRowsClient(apikey, retries=3).fetch(url)
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(mock_request.call_count, 2)
-
-    @patch.object(Session, "request")
-    def test_422_not_retried_without_retries(self, mock_request, mock_sleep):
-        mock_request.return_value = _fake_response(422, NO_CONTENT)
-
-        ZenRowsClient(apikey).fetch(url)
-
-        self.assertEqual(mock_request.call_count, 1)
-
-    @patch.object(Session, "request")
-    def test_no_data_extracted_is_not_retried_async(self, mock_request, mock_sleep):
-        mock_request.return_value = _fake_response(422, NO_DATA)
-
-        response = asyncio.run(ZenRowsClient(apikey, retries=3).extract_async(url))
-
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(mock_request.call_count, 1)
-
-
-class TestIsNoDataExtracted(TestCase):
-    def test_matches_422_no_data_extracted_any_case(self):
-        self.assertTrue(is_no_data_extracted(_fake_response(422, NO_DATA)))
-        self.assertTrue(is_no_data_extracted(_fake_response(422, b'{"code": "NO_DATA_EXTRACTED"}')))
-
-    def test_rejects_other_codes_statuses_and_bodies(self):
-        self.assertFalse(is_no_data_extracted(_fake_response(422, NO_CONTENT)))
-        self.assertFalse(is_no_data_extracted(_fake_response(400, NO_DATA)))
-        self.assertFalse(is_no_data_extracted(_fake_response(422, b"not json")))
-        self.assertFalse(is_no_data_extracted(_fake_response(422, b"[]")))
+def test_is_no_data_extracted_rejects_other_codes_statuses_and_bodies() -> None:
+    assert not is_no_data_extracted(_fake_response(422, NO_CONTENT))
+    assert not is_no_data_extracted(_fake_response(400, NO_DATA))
+    assert not is_no_data_extracted(_fake_response(422, b"not json"))
+    assert not is_no_data_extracted(_fake_response(422, b"[]"))
