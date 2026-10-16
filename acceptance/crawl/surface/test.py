@@ -704,15 +704,12 @@ def c19():
     f = state["F"] = create(depth=1, include_patterns=[NO_MATCH])
     w = client.wait(f.crawl_id)
     err = w.error.model_dump(mode="json") if w.error else None
-    ok = (
-        w.status.value == "failed"
-        and err is not None
-        and err.get("code") == "no_items_found"
-        and bool(err.get("detail"))
-    )
+    urls = [r.url for r in client.results(f.crawl_id)]
+    ok = w.status.value == "completed" and err is None and w.coverage.items_found == 0 and not urls
     return (
         pass_if(ok),
-        f"{f.crawl_id}: {w.status.value}; error {json.dumps(err)}; returned, no exception",
+        f"{f.crawl_id}: {w.status.value}; items_found {w.coverage.items_found}, "
+        f"{len(urls)} results; error {json.dumps(err)}",
         w.model_dump_json(),
     )
 
@@ -837,8 +834,8 @@ run_check(
 srv.shutdown()
 run_check(
     "19",
-    "Failed crawl",
-    "a crawl that keeps nothing ends failed (no_items_found); wait returns it, not raises",
+    "Patterns match nothing",
+    "a crawl whose patterns match nothing ends completed with 0 results and no error",
     c19,
     live=True,
 )
