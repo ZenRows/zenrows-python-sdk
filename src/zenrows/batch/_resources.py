@@ -128,7 +128,12 @@ class RunRef:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
+        skipped: list[TaskResult] | None = None,
     ) -> int:
+        """Write every matching task's body to ``target_dir``, one file
+        per task. Returns the number of files written. Failed and
+        ``expired`` rows have no body: they are skipped and appended to
+        ``skipped`` when you pass a list."""
         return self._client._download_dir(
             self.job_id,
             self.run_id,
@@ -140,6 +145,7 @@ class RunRef:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
+            skipped=skipped,
         )
 
     def download_to_memory(
@@ -151,7 +157,11 @@ class RunRef:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
+        skipped: list[TaskResult] | None = None,
     ) -> "list[DownloadedResult]":
+        """Load every matching task's body into memory. Failed and
+        ``expired`` rows have no body: they are skipped and appended to
+        ``skipped`` when you pass a list."""
         return self._client._download_memory(
             self.job_id,
             self.run_id,
@@ -161,6 +171,7 @@ class RunRef:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
+            skipped=skipped,
         )
 
     # ----- single-task download -----
@@ -226,9 +237,9 @@ class RunRef:
         the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps one export at 100 GiB of results. For a larger
+        run use ``download_to_dir``: it has no export cap, but is slower
+        (one body at a time, tunable via ``concurrency=``)."""
         return self._client.download_all_results(
             self.job_id,
             self.run_id,
@@ -279,7 +290,8 @@ class ExportRef:
     A results export is async: ``start_export()`` returns immediately
     with a ``pending`` ref; the server zips the run in the background
     and it reaches ``completed`` (download URL ready) or ``failed``
-    (with an ``error`` message — e.g. the 1 GiB size cap). Call
+    (with an ``error`` message, e.g. the run is over the 100 GiB
+    export cap). Call
     ``load()`` / ``wait()`` for an :class:`ExportHandle` with data.
     """
 
@@ -525,7 +537,12 @@ class CurrentRun:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
+        skipped: list[TaskResult] | None = None,
     ) -> int:
+        """Write every matching task's body to ``target_dir``, one file
+        per task. Returns the number of files written. Failed and
+        ``expired`` rows have no body: they are skipped and appended to
+        ``skipped`` when you pass a list."""
         return self._client._download_dir(
             self.job_id,
             None,
@@ -537,6 +554,7 @@ class CurrentRun:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
+            skipped=skipped,
         )
 
     def download_to_memory(
@@ -548,7 +566,11 @@ class CurrentRun:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
+        skipped: list[TaskResult] | None = None,
     ) -> "list[DownloadedResult]":
+        """Load every matching task's body into memory. Failed and
+        ``expired`` rows have no body: they are skipped and appended to
+        ``skipped`` when you pass a list."""
         return self._client._download_memory(
             self.job_id,
             None,
@@ -558,6 +580,7 @@ class CurrentRun:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
+            skipped=skipped,
         )
 
     # ----- single-task download -----
@@ -594,9 +617,9 @@ class CurrentRun:
         and save the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps one export at 100 GiB of results. For a larger
+        run use ``download_to_dir``: it has no export cap, but is slower
+        (one body at a time, tunable via ``concurrency=``)."""
         return self._client.download_all_results(
             self.job_id,
             self._current_run_id(),
@@ -751,7 +774,15 @@ class JobRef:
         With ``status`` (single value like ``"failed"`` or list like
         ``["failed", "pending"]``): partial retry — matching statuses
         are reset to ``pending`` and re-enqueued; everything else is
-        inherited verbatim with ``source_run_id`` stamped.
+        inherited verbatim with ``source_run_id`` stamped. A partial
+        retry works within 10 days of the start of the run it retries;
+        after that the API answers 409 ``partial_rerun_window_expired``
+        and only a full rerun works.
+
+        Every rerun is accepted asynchronously (``202``): the new run's
+        task rows keep arriving until ``ingest_status`` is ``done``, so
+        ``results()`` read straight away can be partial. Use
+        ``run.wait()`` (or ``job.wait_for_ingest()``) before reading them.
 
         Returns a :class:`RunHandle` for the newly-created run."""
         resp: RerunJobResponse = self._client._post_rerun(
@@ -786,9 +817,24 @@ class JobRef:
 
     # ----- tasks (write path) -----
 
-    def add_tasks(self, body: AddTasksRequest | AddTasksDict) -> AddTasksResponse:
-        """``POST /jobs/{id}/tasks`` — append to the open initial run."""
-        return self._client._post_tasks(self.job_id, body)
+    def add_tasks(
+        self,
+        body: AddTasksRequest | AddTasksDict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> AddTasksResponse:
+        """``POST /jobs/{id}/tasks``: append up to 10,000 tasks to the
+        open initial run.
+
+        Pass ``idempotency_key`` (up to 128 characters, unique per
+        logical call) to make the call safe to retry. Within 24 hours,
+        a repeat with the same key and body returns the first answer
+        instead of adding the tasks again, and the client then retries
+        transient failures (network errors, 429, 502, 503, 504) on its
+        own. A repeat with a different body, or one sent while the first
+        call is still running, raises 409 ``idempotency_key_conflict``.
+        Without a key every call appends its tasks and is sent once."""
+        return self._client._post_tasks(self.job_id, body, idempotency_key=idempotency_key)
 
     # ----- runs (list) -----
 

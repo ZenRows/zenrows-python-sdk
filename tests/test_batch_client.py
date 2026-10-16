@@ -1178,3 +1178,221 @@ def test_submit_job_post_task_method_body_on_wire(client: ZenRowsBatchClient):
     assert sent["tasks"][0]["body"] == {"query": "{ products { id } }"}
     assert "method" not in sent["tasks"][1]
     assert "body" not in sent["tasks"][1]
+
+
+# ===== expired results, add-tasks idempotency, account limits =====
+
+
+def _results_page(rows: list[dict]) -> dict:
+    base = {
+        "run_id": "R",
+        "url": "https://example.com",
+        "created_at": "2026-08-25T12:00:00Z",
+        "updated_at": "2026-08-25T12:00:05Z",
+    }
+    return {"results": [{**base, **r} for r in rows]}
+
+
+def test_task_status_expired_and_run_trigger_parse():
+    """`expired` is a known TaskStatus and `Run.trigger` is typed."""
+    from zenrows.batch import Run, TaskStatus
+    from zenrows.batch.models import RunTrigger
+
+    row = _task_result("T1", status="expired")
+    assert row.status is TaskStatus.EXPIRED
+    assert row.result_url is None
+    assert not hasattr(row, "spend")  # result rows carry no per-task spend
+
+    run = Run.model_validate(
+        {
+            "run_id": "R",
+            "job_id": "J",
+            "run_sequence": 2,
+            "status": "completed",
+            "trigger": "scheduled",
+            "stats": {"total": 1, "completed": 1, "successful": 1, "failed": 0},
+            "created_at": "2026-08-25T12:00:00Z",
+            "updated_at": "2026-08-25T12:00:05Z",
+        }
+    )
+    assert run.trigger is RunTrigger.SCHEDULED
+
+
+@respx.mock
+def test_download_to_dir_skips_expired_and_failed_rows(
+    client: ZenRowsBatchClient, tmp_path, caplog
+):
+    """Rows with no body (expired, failed) are skipped and reported, not
+    fatal; the rest download."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(
+            200,
+            json=_results_page(
+                [
+                    {
+                        "task_id": "T1",
+                        "status": "successful",
+                        "type": "html",
+                        "result_url": "https://storage.example.test/T1",
+                    },
+                    {"task_id": "T2", "status": "expired", "type": "html"},
+                    {"task_id": "T3", "status": "failed"},
+                    {"task_id": "T4", "status": "expired"},
+                ]
+            ),
+        )
+    )
+    respx.get("https://storage.example.test/T1").mock(return_value=Response(200, content=b"ok"))
+
+    skipped: list[TaskResult] = []
+    with caplog.at_level("WARNING", logger="zenrows.batch.download"):
+        n = client.run("J", "R").download_to_dir(tmp_path, status=None, skipped=skipped)
+
+    assert n == 1
+    assert (tmp_path / "T1.html").read_bytes() == b"ok"
+    assert [r.task_id for r in skipped] == ["T2", "T3", "T4"]
+    assert "skipped 3 result(s)" in caplog.text
+    assert "2 expired" in caplog.text and "1 failed" in caplog.text
+
+
+@respx.mock
+def test_download_to_memory_skips_expired_rows_concurrently(client: ZenRowsBatchClient):
+    """The parallel path skips the same rows, and they don't count toward
+    `max_count`."""
+    rows = [
+        {
+            "task_id": f"T{i}",
+            "status": "successful",
+            "result_url": f"https://storage.example.test/T{i}",
+        }
+        for i in range(3)
+    ] + [{"task_id": f"E{i}", "status": "expired"} for i in range(5)]
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(200, json=_results_page(rows))
+    )
+    respx.get(url__startswith="https://storage.example.test/").mock(
+        return_value=Response(200, content=b"x")
+    )
+
+    skipped: list[TaskResult] = []
+    out = client.run("J", "R").download_to_memory(concurrency=4, max_count=3, skipped=skipped)
+
+    assert sorted(r.task_id for r in out) == ["T0", "T1", "T2"]
+    assert len(skipped) == 5
+
+
+@respx.mock
+def test_download_successful_row_without_url_still_raises(client: ZenRowsBatchClient, tmp_path):
+    """A `successful` row with no `result_url` is not a row without a
+    body, so it is not skipped silently."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(200, json=_results_page([{"task_id": "T1", "status": "successful"}]))
+    )
+    with pytest.raises(ValueError, match="no result_url"):
+        client.run("J", "R").download_to_dir(tmp_path)
+
+
+def test_download_task_expired_raises_clear_error(client: ZenRowsBatchClient):
+    task = _task_result("T1", status="expired")
+    with pytest.raises(ValueError, match="has expired"):
+        client.run("J", "R").download_task_to_memory(task)
+
+
+def _add_tasks_ok() -> Response:
+    return Response(
+        200, json={"accepted_tasks": 1, "job_status": "open", "latest_run": _run_json()}
+    )
+
+
+@respx.mock
+def test_add_tasks_sends_idempotency_key_and_retries_transient(
+    client: ZenRowsBatchClient, no_sleep
+):
+    """With a key, add-tasks sends `Idempotency-Key` and a 503 is retried
+    with the same key."""
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(
+        side_effect=[Response(503, json={}), _add_tasks_ok()]
+    )
+
+    resp = client.job("J").add_tasks(
+        {"tasks": [{"url": "https://example.com/a"}]}, idempotency_key="add-1"
+    )
+
+    assert resp.accepted_tasks == 1
+    assert route.call_count == 2
+    assert [c.request.headers["Idempotency-Key"] for c in route.calls] == ["add-1", "add-1"]
+
+
+@respx.mock
+def test_add_tasks_without_key_is_sent_once(client: ZenRowsBatchClient, no_sleep):
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(return_value=Response(503, json={}))
+
+    with pytest.raises(BatchAPIError):
+        client.job("J").add_tasks({"tasks": [{"url": "https://example.com/a"}]})
+
+    assert route.call_count == 1
+    assert "Idempotency-Key" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_quota_exceeded_429_is_not_retried(client: ZenRowsBatchClient, no_sleep):
+    """A 429 `quota_exceeded` is an account limit: raised at once, with
+    the named code."""
+    from zenrows.batch import BatchErrorCode
+
+    route = respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            429,
+            json={
+                "type": "https://docs.zenrows.com/api-error-codes#quota_exceeded",
+                "title": "Quota exceeded",
+                "status": 429,
+                "code": "quota_exceeded",
+            },
+        )
+    )
+
+    with pytest.raises(BatchAPIError) as exc:
+        client.submit_regular(["https://a"], idempotency_key="k1")
+
+    assert route.call_count == 1
+    assert no_sleep == []
+    assert exc.value.code == BatchErrorCode.QUOTA_EXCEEDED
+
+
+@respx.mock
+def test_plain_429_is_still_retried(client: ZenRowsBatchClient, no_sleep):
+    route = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[Response(429, json={}), Response(200, json=_ingest_job_json("done"))]
+    )
+    client.get_job("J")
+    assert route.call_count == 2
+
+
+def test_batch_error_code_names_every_api_code():
+    """`BatchErrorCode` covers every code the Batch API sends, and its
+    members compare equal to the plain-string `BatchAPIError.code`."""
+    from zenrows.batch import BatchErrorCode
+
+    expected = {
+        "invalid_argument", "not_found", "conflict", "unauthenticated",
+        "payment_required", "permission_denied", "quota_exceeded",
+        "subscription_inactive", "api_key_cap_reached", "internal",
+        "job_not_open", "run_not_terminal", "run_not_stoppable", "no_prior_run",
+        "no_matching_tasks", "run_has_descendants", "last_batch_received",
+        "idempotency_key_conflict", "task_not_ready", "not_implemented",
+        "result_expired", "partial_rerun_window_expired", "candidate_pending",
+        "no_candidate", "unsupported_scheme", "malformed_url", "missing_host",
+        "url_too_long", "metadata_too_large", "metadata_key_invalid",
+        "invalid_external_id", "unsupported_method", "body_not_allowed",
+        "body_too_large", "body_malformed", "method_param_conflict",
+        "file_input_not_found", "file_input_not_uploaded",
+        "file_input_unsupported_for_job_type", "callback_url_must_be_https",
+        "callback_url_unresolvable", "webhook_signing_requires_active_key",
+        "gateway_unreachable",
+    }  # fmt: skip
+    assert {c.value for c in BatchErrorCode} == expected
+    assert BatchErrorCode.RESULT_EXPIRED == "result_expired"
+    err = BatchAPIError(410, None, b"")
+    err.code = "result_expired"
+    assert err.code == BatchErrorCode.RESULT_EXPIRED

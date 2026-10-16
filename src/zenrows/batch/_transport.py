@@ -34,7 +34,7 @@ _log = logger("transport")
 _RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
 
 # Methods safe to replay without side effects. POST is added only when
-# the caller supplied an Idempotency-Key (submit / rerun).
+# the caller supplied an Idempotency-Key (submit, rerun, add-tasks).
 _IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE", "HEAD", "OPTIONS"})
 
 # Retry tuning (mirrors the Node SDK): ~250ms · 2**attempt, ±20% jitter,
@@ -45,6 +45,23 @@ _BACKOFF_CAP_MS = 10_000
 # cannot hang a call.
 _RETRY_AFTER_CAP_MS = 30_000
 _DEFAULT_RETRIES = 3
+
+
+# A 429 with this problem code is an account limit (active or scheduled
+# jobs, or an open job's task cap), not rate limiting: it clears only when
+# a job finishes, is closed or is deleted, so a retry only adds delay.
+_NOT_RETRYABLE_429_CODES = frozenset({"quota_exceeded"})
+
+
+def _is_account_limit(response: httpx.Response) -> bool:
+    """True for a 429 whose problem body names an account limit."""
+    if response.status_code != 429:
+        return False
+    try:
+        body = json.loads(response.content or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("code") in _NOT_RETRYABLE_429_CODES
 
 
 def _has_idempotency_key(headers: dict[str, str] | None) -> bool:
@@ -135,7 +152,9 @@ class _Transport:
         idempotent requests are replayed — `GET`/`PUT`/`DELETE`/`HEAD`/
         `OPTIONS`, plus `POST` when the caller supplied an
         `Idempotency-Key`. Our own timeouts (`httpx.TimeoutException`)
-        are never retried: the caller set that budget.
+        are never retried: the caller set that budget. A 429
+        `quota_exceeded` is an account limit, not rate limiting, and is
+        returned at once.
         """
         idempotent = method.upper() in _IDEMPOTENT_METHODS or (
             method.upper() == "POST" and _has_idempotency_key(headers)
@@ -157,7 +176,12 @@ class _Transport:
                     continue
                 raise
 
-            if idempotent and attempt < self._retries and response.status_code in retry_statuses:
+            if (
+                idempotent
+                and attempt < self._retries
+                and response.status_code in retry_statuses
+                and not _is_account_limit(response)
+            ):
                 wait_ms = _retry_after_ms(response) or _backoff_ms(attempt)
                 response.close()
                 time.sleep(wait_ms / 1000)
