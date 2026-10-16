@@ -16,7 +16,10 @@ permissions: {}
 jobs:
   release-pr:
     name: Open or update the release PR
-    if: github.event_name == 'push'
+    # After the tag job: on the push that merges a release PR, release-please
+    # must see the new release, or it reads the whole history as unreleased.
+    needs: release
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.release.result != 'failure' }}
     runs-on: ubuntu-latest
     concurrency:
       group: ${{ github.workflow }}-release-pr
