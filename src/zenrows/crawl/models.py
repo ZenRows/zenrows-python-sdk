@@ -80,7 +80,13 @@ class CrawlErrorCode(Enum):
 
     `insufficient_credits` and `api_key_cap_reached` come with
     `status` `stopped`: the pages fetched before that stay readable.
-    The other codes come with `failed`."""
+    The other codes come with `failed`. `seed_unreachable` covers a
+    start page that could not be fetched, was blocked, or came back
+    empty, with no visible text and no link. `no_items_found` means
+    that, in a crawl that runs Extract, Extract read the start page
+    and found no data on it. A crawl that returns nothing for any
+    other reason is not a failure: it ends `completed` with no
+    results."""
 
     INSUFFICIENT_CREDITS = "insufficient_credits"
     API_KEY_CAP_REACHED = "api_key_cap_reached"

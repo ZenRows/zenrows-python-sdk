@@ -682,8 +682,9 @@ def test_wait_returns_failed_crawl(client: ZenRowsCrawlClient, no_sleep):
                 status="failed",
                 error={
                     "code": "no_items_found",
-                    "detail": "The crawl found no items: the pages it fetched held no links "
-                    "or listings it could follow.",
+                    "detail": "Extract read the start page and found no data on it, so the "
+                    "crawl had nothing to follow. Start from a page Extract reads, such as a "
+                    "listing or a product page.",
                 },
                 results=[],
                 next_cursor=None,
