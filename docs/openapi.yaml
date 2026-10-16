@@ -86,9 +86,6 @@ paths:
         `ingest_status` field reports the ingest state: poll
         `GET /v1/jobs/{id}` until `latest_run.ingest_status` is
         `done` to know every task row is visible.
-
-        `type: scheduled` is reserved for a future feature and
-        currently returns `501 not_implemented`.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -127,7 +124,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '402': { $ref: '#/components/responses/PaymentRequired' }
         '409': { $ref: '#/components/responses/IdempotencyConflict' }
-        '501': { $ref: '#/components/responses/NotImplemented' }
+        '429': { $ref: '#/components/responses/QuotaExceeded' }
         '503': { $ref: '#/components/responses/Unavailable' }
 
     get:
@@ -204,6 +201,15 @@ paths:
 
         Setting `last_batch: true` closes the job (status → `closed`)
         and signals the run to flip to `completed` once tasks drain.
+
+        Honors `Idempotency-Key`, scoped to the caller and the job: a
+        repeat of a call that answered `200` replays that answer, and a
+        repeat of a call that failed part-way (a `503` after its tasks
+        were stored, or a lost response) finishes it without adding,
+        enqueuing or counting any task twice. Without the header every
+        call appends its tasks.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -219,12 +225,17 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '402': { $ref: '#/components/responses/PaymentRequired' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/QuotaExceeded' }
         '409':
           description: |
             Job is not open, last batch already received, or the
             initial run's task ingestion is still in progress (large
             `202`-accepted submissions) — in the last case, retry
             once ingest completes.
+
+            Also returned when an `Idempotency-Key` is reused with a
+            different body, or while an earlier call with the same key
+            is still running (retry shortly).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -333,7 +344,7 @@ paths:
         latest run is terminal (use `/rerun` to start fresh) and
         404 on a deleted job.
 
-        Billing note: in-flight gateway calls still consume credits.
+        Billing note: requests already in flight still consume credits.
         Use `/cancel` for a hard cost-stop.
       responses:
         '200':
@@ -1002,7 +1013,7 @@ paths:
 
         The export fails with
         `error: "results are larger than N gb"` if the combined size
-        of the results exceeds the export byte cap (20 GiB).
+        of the results exceeds the export byte cap (100 GiB).
       responses:
         '202':
           description: Export accepted; the zip is produced asynchronously.
@@ -1078,9 +1089,11 @@ components:
       in: header
       required: false
       description: |
-        Optional opaque token scoping a single submit / rerun
-        request. Re-submitting with the same key returns the
-        original response (or 409 on body mismatch).
+        Optional opaque token scoping a single submit, rerun or
+        add-tasks request. Sending the same key again with the same
+        body replays the original status and body. A different body,
+        or a repeat while the original is still running, returns
+        `409 idempotency_key_conflict`. Keys are kept for 24 hours.
       schema: { type: string, maxLength: 128 }
     ResultStatus:
       name: status
@@ -1135,6 +1148,15 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     NotFound:
       description: Resource not found (or not owned by caller).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    QuotaExceeded:
+      description: |
+        Account limit reached (`quota_exceeded`): too many active jobs
+        (3 per account, shared with Crawl), too many scheduled jobs (5),
+        or an open job's task cap (100,000). Not transient: retrying
+        does not help until a job finishes, is closed or is deleted.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -1236,8 +1258,15 @@ components:
     TaskStatus:
       type: string
       x-extensible-enum: true
-      enum: [pending, processing, successful, failed]
-      description: Clients must accept values not listed here.
+      enum: [pending, processing, successful, failed, expired]
+      description: |
+        - `expired`: a successful task whose result is past the job's
+          retention window (14 days by default). The row has no
+          `result_url`, and the content endpoint answers
+          `410 result_expired`. A `status=successful` filter still
+          returns these rows.
+
+        Clients must accept values not listed here.
 
     ResultType:
       type: string
@@ -1310,7 +1339,7 @@ components:
         header sanitisation. At most 32 headers / 8 KB serialised;
         names must be valid HTTP tokens. Header filtering and
         browser-header sanitisation are owned by the scraper API,
-        not Conveyor. A task-level
+        not the Batch API. A task-level
         `custom_headers` replaces the job-level object wholesale —
         no per-name merging.
       additionalProperties:
@@ -1398,12 +1427,12 @@ components:
         tasks:
           type: array
           description: |
-            Required for closed jobs (1–1000) unless `file_input_id`
+            Required for closed jobs (1 to 100,000) unless `file_input_id`
             is provided. Optional for open jobs — may be empty if the
             caller will follow up with `addTasks`. Mutually exclusive
             with `file_input_id`.
           minItems: 0
-          maxItems: 1000
+          maxItems: 100000
           items: { $ref: '#/components/schemas/TaskInput' }
         file_input_id:
           type: string
@@ -1468,7 +1497,7 @@ components:
         tasks:
           type: array
           minItems: 1
-          maxItems: 1000
+          maxItems: 10000
           items: { $ref: '#/components/schemas/TaskInput' }
         last_batch:
           type: boolean
@@ -1522,19 +1551,6 @@ components:
         credits: { type: integer, minimum: 0 }
         cost: { type: number, format: double, minimum: 0 }
 
-    TaskSpend:
-      type: object
-      description: |
-        Per-task indicative spend with two roll-ups: `total`
-        accumulates across every attempt (including retries),
-        `last_attempt` carries just the most recent gateway call.
-        On a task that succeeded on its first try the two are
-        equal; on a retried task they diverge.
-      required: [total, last_attempt]
-      properties:
-        total: { $ref: '#/components/schemas/Spend' }
-        last_attempt: { $ref: '#/components/schemas/Spend' }
-
     RunStats:
       type: object
       required: [total, completed, successful, failed]
@@ -1554,8 +1570,10 @@ components:
 
             Vocabulary (the only keys that appear):
             - `auth_failed` — credentials or billing
-            - `blocked` — anti-bot / policy denials
-            - `bad_target` — target URL is the problem (bad host, 404, 410, too large)
+            - `blocked`: anti-bot / policy denials, including a bot wall
+              Extract met on the fetched page
+            - `bad_target`: target URL is the problem (bad host, 404, 410,
+              too large, or a page Extract does not cover or found no data on)
             - `rate_limited` — target throttled the request
             - `timeout` — the scrape didn't complete in time
             - `gateway_error` — Zenrows-side transport / 5xx
@@ -1581,6 +1599,7 @@ components:
         job_id: { type: string }
         run_sequence: { type: integer, minimum: 1 }
         status: { $ref: '#/components/schemas/RunStatus' }
+        trigger: { $ref: '#/components/schemas/RunTrigger' }
         stats: { $ref: '#/components/schemas/RunStats' }
         last_batch_received:
           type: boolean
@@ -1850,9 +1869,11 @@ components:
           type: string
           nullable: true
           description: |
-            24-hour presigned download URL for the result body, or a
-            `/v1/jobs/<id>/runs/<run>/tasks/<tid>/content` URL you can
-            fetch directly. Empty for non-successful tasks.
+            Presigned download URL for the result body, valid for 2
+            hours; list the results again for a fresh one. Empty for
+            failed and `expired` tasks. The body is also served by
+            `GET /v1/jobs/{job_id}/runs/{run_id}/tasks/{task_id}/content`,
+            which needs your API key.
         error:
           $ref: '#/components/schemas/Problem'
           description: |
@@ -1868,7 +1889,6 @@ components:
             source run's stored result. On chained retries,
             `source_run_id` chases back to the run that actually
             owns the result. Empty for normally-executed rows.
-        spend: { $ref: '#/components/schemas/TaskSpend' }
         created_at:
           type: string
           format: date-time
@@ -2198,8 +2218,9 @@ components:
         code:
           type: string
           description: |
-            Stable machine-readable error code, e.g. `payment_required`
-            or `api_key_cap_reached`. Branch on this, not on `detail`.
+            Stable machine-readable error code, e.g. `payment_required`,
+            `api_key_cap_reached` or `subscription_inactive`. Branch on
+            this, not on `detail`.
             Clients must accept values not listed here.
         instance: { type: string }
         invalid_tasks:
@@ -2284,7 +2305,7 @@ components:
           description: |
             Non-empty only when `status = failed`. Stable strings —
             e.g. `"results are larger than N gb"` when the combined
-            results exceed the export byte cap (20 GiB).
+            results exceed the export byte cap (100 GiB).
         download_url:
           type: string
           format: uri
