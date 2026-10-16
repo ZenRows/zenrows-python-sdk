@@ -15,6 +15,7 @@ import asyncio
 import math
 import os
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
@@ -58,11 +59,11 @@ def is_no_data_extracted(response: requests.Response) -> bool:
     return response.status_code == 422 and code is not None and code.lower() == _NO_DATA_EXTRACTED
 
 
-# Extract answers these when it can't serve the target domain: 403 REQS007
-# (domain not prepared yet) or the legacy 402 AUTH010 (domain not enabled).
-# extract(mode="auto", fallback_to_autoparse=True) retries both once with the
-# deprecated Autoparse; by default they are returned to the caller as is.
-_EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
+_FALLBACK_DEPRECATED = (
+    "fallback_to_autoparse is deprecated and has no effect: extract() no longer "
+    "retries with autoparse. On a 403 REQS007, check `reason` in the problem "
+    "body; for domain_not_prepared, prepare the domain with prepare_domain()."
+)
 
 
 def _check_domain(domain: str) -> None:
@@ -90,15 +91,6 @@ def _prepared_domain_body(response: requests.Response) -> dict:
     if not isinstance(body, dict):
         raise PreparedDomainError(response.status_code, None)
     return body
-
-
-def _is_extract_domain_unavailable(response: requests.Response) -> bool:
-    """True when the response is Extract saying it can't serve the target
-    domain yet (403 REQS007, or the legacy 402 AUTH010)."""
-    code = _error_code(response)
-    if code is None:
-        return False
-    return (response.status_code, code.upper()) in _EXTRACT_DOMAIN_UNAVAILABLE
 
 
 class PreparedDomainError(Exception):
@@ -264,18 +256,26 @@ class ZenRowsClient:
 
         Extract works on any prepared domain (you can prepare one yourself
         with `POST /v1/extract/prepared-domains`), with any active API key.
-        A 403 with `code: "REQS007"` means the domain isn't prepared for
-        Extract yet: prepare it with `POST /v1/extract/prepared-domains`
-        (`prepare_domain()`, then check it with `prepared_domain_status()`),
-        or pass `fallback_to_autoparse=True` to retry with deprecated
-        autoparse.
-        The legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
-        By default both error responses are returned to you as is.
+        A 403 with `code: "REQS007"` means Extract can't extract this page.
+        Check `reason` in the problem body (`response.json().get("reason")`)
+        when present; older responses may not carry it:
 
-        `fallback_to_autoparse=True` (opt-in, default False) makes
-        `mode="auto"` retry once with `autoparse=True` on either code instead
-        of returning the error response. Autoparse is deprecated, and the
-        retry is a second, separately charged request.
+          - `domain_not_prepared`: prepare the domain with `prepare_domain()`,
+            poll `prepared_domain_status()` until `status` is `"ready"`, then
+            retry.
+          - `page_not_recognised`: the domain is served, but this page isn't
+            one Extract extracts (a home, search, login or category page).
+            Try a product, article or listing page, or retry once in a few
+            minutes. Preparing the domain again changes nothing.
+          - `domain_not_enabled`: preparing doesn't help. Use
+            `css_extractor`, or contact support.
+
+        The legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
+        Both error responses are returned to you as is, in one request.
+
+        `fallback_to_autoparse` is deprecated and has no effect: extract()
+        never retries with autoparse. Passing True emits a
+        `DeprecationWarning`.
 
         A 422 with `code: "no_data_extracted"` means Extract knows this kind
         of page but found no data on it. It is not charged and is never
@@ -283,26 +283,18 @@ class ZenRowsClient:
 
         `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
-        `mode` argument) on the extract attempt and on the Autoparse fallback
-        when `fallback_to_autoparse=True`,
-        so a target needing `js_render`/`premium_proxy` gets escalated
+        `mode` argument), so a target needing `js_render`/`premium_proxy` gets escalated
         automatically instead of failing with REQS002. It is skipped when
         `params` sets `js_render` or `premium_proxy` (the API rejects either
         combined with Adaptive Stealth Mode) or its own wire `mode`. Pass
         `adaptive_stealth=False` to turn it off entirely.
         """
+        if fallback_to_autoparse:
+            warnings.warn(_FALLBACK_DEPRECATED, DeprecationWarning, stacklevel=2)
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         _with_adaptive_stealth(final_params, adaptive_stealth)
-        response = self.fetch(url, final_params, headers, **kwargs)
-
-        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
-            autoparse_params = dict(params) if params else {}
-            autoparse_params["autoparse"] = True
-            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
-            return self.fetch(url, autoparse_params, headers, **kwargs)
-
-        return response
+        return self.fetch(url, final_params, headers, **kwargs)
 
     def post(
         self,
@@ -414,20 +406,14 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        REQS007 / AUTH010 handling, the opt-in `fallback_to_autoparse`, and
+        REQS007 `reason` cases, the deprecated `fallback_to_autoparse`, and
         `adaptive_stealth`."""
+        if fallback_to_autoparse:
+            warnings.warn(_FALLBACK_DEPRECATED, DeprecationWarning, stacklevel=2)
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         _with_adaptive_stealth(final_params, adaptive_stealth)
-        response = await self.fetch_async(url, final_params, headers, **kwargs)
-
-        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
-            autoparse_params = dict(params) if params else {}
-            autoparse_params["autoparse"] = True
-            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
-            return await self.fetch_async(url, autoparse_params, headers, **kwargs)
-
-        return response
+        return await self.fetch_async(url, final_params, headers, **kwargs)
 
     async def prepare_domain_async(self, domain: str, example_urls: list[str]) -> dict:
         """Async counterpart of `prepare_domain()`, run on the client's thread pool."""

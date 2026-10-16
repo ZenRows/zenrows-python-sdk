@@ -205,13 +205,27 @@ print(response.json())
 
 `extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
 
-Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means the domain isn't prepared for Extract yet: prepare it with `POST /v1/extract/prepared-domains` (`client.prepare_domain()`, see below), or pass `fallback_to_autoparse=True` to retry with deprecated autoparse. The legacy `402` with `code: "AUTH010"` is handled the same way. By default `extract()` returns both error responses to you as is, without a second request.
+Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means Extract can't extract this page. Check `reason` in the problem body when present; older responses may not carry it:
+
+- `domain_not_prepared`: prepare the domain with `client.prepare_domain()` (see below), poll `client.prepared_domain_status()` until `status` is `"ready"`, then retry.
+- `page_not_recognised`: the domain is served, but this page isn't one Extract extracts (a home, search, login or category page). Try a product, article or listing page, or retry once in a few minutes. Preparing the domain again changes nothing.
+- `domain_not_enabled`: preparing doesn't help. Use `css_extractor`, or contact support.
 
 ```python
-# Opt in to one retry with the deprecated autoparse on REQS007 / AUTH010.
-# The retry is a second, separately charged request.
-response = client.extract(url, fallback_to_autoparse=True)
+response = client.extract(url)
+if response.status_code == 403:
+    problem = response.json()
+    if problem.get("code") == "REQS007":
+        reason = problem.get("reason")  # None on older responses
+        if reason == "domain_not_prepared":
+            ...  # client.prepare_domain(...), then poll client.prepared_domain_status(...)
+        elif reason == "page_not_recognised":
+            ...  # try a product, article or listing page
+        elif reason == "domain_not_enabled":
+            ...  # use css_extractor, or contact support
 ```
+
+The legacy `402` with `code: "AUTH010"` means the domain isn't enabled. `extract()` returns both error responses to you as is, in one request, and never retries them with autoparse. `fallback_to_autoparse` is deprecated and has no effect; passing `True` emits a `DeprecationWarning`.
 
 #### Preparing a domain
 
