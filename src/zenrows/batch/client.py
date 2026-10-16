@@ -332,8 +332,10 @@ class ZenRowsBatchClient:
         metadata: dict[str, str] | None = None,
         webhook: WebhookDict | None = None,
         idempotency_key: str | None = None,
+        wait_for_ingest: bool = False,
     ) -> JobRef:
-        """Submit a scheduled job.
+        """Submit a scheduled job. `wait_for_ingest` works as on
+        `submit_job`.
 
         `schedule` is one of the typed builders (`At`, `Rate`,
         `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -388,7 +390,9 @@ class ZenRowsBatchClient:
             metadata=metadata,
             webhook=webhook,
         )
-        return self.submit_job(body, idempotency_key=idempotency_key)
+        return self.submit_job(
+            body, idempotency_key=idempotency_key, wait_for_ingest=wait_for_ingest
+        )
 
     def get_job(self, job_id: str) -> JobHandle:
         """`GET /jobs/{job_id}` — returns a loaded `JobHandle` with

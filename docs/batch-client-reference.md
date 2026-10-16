@@ -174,10 +174,12 @@ def submit_scheduled(schedule: Schedule | JobScheduleDict,
                      name: str | None = None,
                      metadata: dict[str, str] | None = None,
                      webhook: WebhookDict | None = None,
-                     idempotency_key: str | None = None) -> JobRef
+                     idempotency_key: str | None = None,
+                     wait_for_ingest: bool = False) -> JobRef
 ```
 
-Submit a scheduled job.
+Submit a scheduled job. `wait_for_ingest` works as on
+`submit_job`.
 
 `schedule` is one of the typed builders (`At`, `Rate`,
 `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -1289,7 +1291,8 @@ def delete() -> None
 ```python
 def rerun(*,
           status: str | list[str] | None = None,
-          idempotency_key: str | None = None) -> "RunHandle"
+          idempotency_key: str | None = None,
+          wait_for_ingest: bool = False) -> "RunHandle"
 ```
 
 ``POST /jobs/{id}/rerun[?status=...]`` — start a new run.
@@ -1308,8 +1311,10 @@ and only a full rerun works.
 
 Every rerun is accepted asynchronously (``202``): the new run's
 task rows keep arriving until ``ingest_status`` is ``done``, so
-``results()`` read straight away can be partial. Use
-``run.wait()`` (or ``job.wait_for_ingest()``) before reading them.
+``results()`` read straight away can be partial. Pass
+``wait_for_ingest=True`` to return only once every task row is
+written (it polls for up to 300 s), or use ``run.wait()`` /
+``job.wait_for_ingest()`` before reading them.
 
 Returns a :class:`RunHandle` for the newly-created run.
 
@@ -1320,7 +1325,8 @@ Returns a :class:`RunHandle` for the newly-created run.
 ```python
 def retry_failed(*,
                  include_pending: bool = False,
-                 idempotency_key: str | None = None) -> "RunHandle"
+                 idempotency_key: str | None = None,
+                 wait_for_ingest: bool = False) -> "RunHandle"
 ```
 
 Start a new run that re-executes only the previous run's
@@ -1332,6 +1338,9 @@ Shortcut for ``rerun(status="failed")``. Set
 ``include_pending=True`` to also re-enqueue tasks that never
 started (``status="failed,pending"``) — the usual move after a
 ``stop()`` left orphan ``pending`` rows.
+
+``wait_for_ingest=True`` returns only once the new run's task
+rows are all written, as on :meth:`rerun`.
 
 Returns a :class:`RunHandle` for the new run. Requires the
 previous run to be terminal (``completed`` / ``stopped`` /

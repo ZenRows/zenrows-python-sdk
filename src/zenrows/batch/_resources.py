@@ -46,6 +46,7 @@ from zenrows.batch.models import (
     AddTasksResponse,
     Export,
     ExportStatus,
+    IngestStatus,
     Job,
     JobStatus,
     RerunJobResponse,
@@ -772,6 +773,7 @@ class JobRef:
         *,
         status: str | list[str] | None = None,
         idempotency_key: str | None = None,
+        wait_for_ingest: bool = False,
     ) -> "RunHandle":
         """``POST /jobs/{id}/rerun[?status=...]`` — start a new run.
 
@@ -789,20 +791,28 @@ class JobRef:
 
         Every rerun is accepted asynchronously (``202``): the new run's
         task rows keep arriving until ``ingest_status`` is ``done``, so
-        ``results()`` read straight away can be partial. Use
-        ``run.wait()`` (or ``job.wait_for_ingest()``) before reading them.
+        ``results()`` read straight away can be partial. Pass
+        ``wait_for_ingest=True`` to return only once every task row is
+        written (it polls for up to 300 s), or use ``run.wait()`` /
+        ``job.wait_for_ingest()`` before reading them.
 
         Returns a :class:`RunHandle` for the newly-created run."""
         resp: RerunJobResponse = self._client._post_rerun(
             self.job_id, status=status, idempotency_key=idempotency_key
         )
-        return RunHandle(self._client, self.job_id, resp.latest_run.run_id, resp.latest_run)
+        run = resp.latest_run
+        if wait_for_ingest and run.ingest_status is IngestStatus.PENDING:
+            job = self._client._wait_for_ingest_raw(self.job_id, timeout=300.0, poll_interval=2.0)
+            if job.latest_run is not None and job.latest_run.run_id == run.run_id:
+                run = job.latest_run
+        return RunHandle(self._client, self.job_id, run.run_id, run)
 
     def retry_failed(
         self,
         *,
         include_pending: bool = False,
         idempotency_key: str | None = None,
+        wait_for_ingest: bool = False,
     ) -> "RunHandle":
         """Start a new run that re-executes only the previous run's
         **failed** tasks (partial retry). Successful tasks
@@ -814,6 +824,9 @@ class JobRef:
         started (``status="failed,pending"``) — the usual move after a
         ``stop()`` left orphan ``pending`` rows.
 
+        ``wait_for_ingest=True`` returns only once the new run's task
+        rows are all written, as on :meth:`rerun`.
+
         Returns a :class:`RunHandle` for the new run. Requires the
         previous run to be terminal (``completed`` / ``stopped`` /
         ``failed``); raises
@@ -821,7 +834,9 @@ class JobRef:
         (409 ``no_matching_tasks``) when nothing matched the filter.
         """
         statuses = ["failed", "pending"] if include_pending else "failed"
-        return self.rerun(status=statuses, idempotency_key=idempotency_key)
+        return self.rerun(
+            status=statuses, idempotency_key=idempotency_key, wait_for_ingest=wait_for_ingest
+        )
 
     # ----- tasks (write path) -----
 

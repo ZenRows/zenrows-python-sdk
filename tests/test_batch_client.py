@@ -1467,3 +1467,85 @@ def test_wait_while_paused_keeps_polling(client: ZenRowsBatchClient, no_poll_sle
 
     assert run.status.value == "completed"
     assert route.call_count == 3
+
+
+# ===== wait_for_ingest on rerun / retry_failed / submit_scheduled =====
+
+
+def _ingesting_rerun(ingest_status: str) -> dict:
+    body = _rerun_response("R2", total=100, successful=0)
+    body["latest_run"]["ingest_status"] = ingest_status
+    return body
+
+
+def _job_with_run(ingest_status: str) -> dict:
+    job = _ingest_job_json("done")
+    job["latest_run"] = {**_run_json(run_id="R2"), "ingest_status": ingest_status}
+    return job
+
+
+@respx.mock
+@pytest.mark.parametrize("call", ["rerun", "retry_failed"])
+def test_rerun_wait_for_ingest_polls_until_done(
+    client: ZenRowsBatchClient, no_poll_sleep, call: str
+):
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    poll = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[
+            Response(200, json=_job_with_run("pending")),
+            Response(200, json=_job_with_run("done")),
+        ]
+    )
+
+    run = getattr(client.job("J"), call)(wait_for_ingest=True)
+
+    assert poll.call_count == 2
+    assert run.run_id == "R2"
+    assert run.data.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_rerun_without_wait_for_ingest_returns_at_once(client: ZenRowsBatchClient):
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    poll = respx.get(f"{BASE_URL}/jobs/J")
+
+    run = client.job("J").rerun()
+
+    assert poll.call_count == 0
+    assert run.data.ingest_status is IngestStatus.PENDING
+
+
+@respx.mock
+def test_submit_scheduled_wait_for_ingest_polls_until_done(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    from zenrows.batch import Rate
+
+    respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            202,
+            json={
+                "job_id": "J",
+                "status": "closed",
+                "accepted_tasks": 10000,
+                "latest_run": _ingest_run_json("pending"),
+            },
+        )
+    )
+    poll = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[
+            Response(200, json=_ingest_job_json("pending")),
+            Response(200, json=_ingest_job_json("done")),
+        ]
+    )
+
+    handle = client.submit_scheduled(
+        Rate(every=6, unit="hour"), ["https://example.com"], wait_for_ingest=True
+    )
+
+    assert poll.call_count == 2
+    assert handle.data.latest_run.ingest_status is IngestStatus.DONE
