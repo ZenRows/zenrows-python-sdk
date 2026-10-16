@@ -178,8 +178,12 @@ def submit_scheduled(schedule: Schedule | JobScheduleDict,
                      wait_for_ingest: bool = False) -> JobRef
 ```
 
-Submit a scheduled job. `wait_for_ingest` works as on
-`submit_job`.
+Submit a scheduled job.
+
+Creating a scheduled job starts no run (the first fire creates
+Run 1), so there is nothing to ingest yet and
+`wait_for_ingest=True` returns at once. It is accepted for
+parity with `submit_job`.
 
 `schedule` is one of the typed builders (`At`, `Rate`,
 `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -1312,9 +1316,14 @@ and only a full rerun works.
 Every rerun is accepted asynchronously (``202``): the new run's
 task rows keep arriving until ``ingest_status`` is ``done``, so
 ``results()`` read straight away can be partial. Pass
-``wait_for_ingest=True`` to return only once every task row is
-written (it polls for up to 300 s), or use ``run.wait()`` /
-``job.wait_for_ingest()`` before reading them.
+``wait_for_ingest=True`` to poll the run this call returned
+(``GET /jobs/{id}/runs/{run_id}``, for up to 300 s) until its
+``ingest_status`` is no longer ``pending``, and get that fresh
+snapshot back. This also holds when the call replays an earlier
+answer for the same ``idempotency_key``. A run stopped while it
+was ingesting comes back ``stopped`` once ingestion has wound
+down, with only the rows written so far (``stats.total`` is cut
+to match). Otherwise use ``run.wait()`` before reading results.
 
 Returns a :class:`RunHandle` for the newly-created run.
 

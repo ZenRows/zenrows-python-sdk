@@ -792,9 +792,14 @@ class JobRef:
         Every rerun is accepted asynchronously (``202``): the new run's
         task rows keep arriving until ``ingest_status`` is ``done``, so
         ``results()`` read straight away can be partial. Pass
-        ``wait_for_ingest=True`` to return only once every task row is
-        written (it polls for up to 300 s), or use ``run.wait()`` /
-        ``job.wait_for_ingest()`` before reading them.
+        ``wait_for_ingest=True`` to poll the run this call returned
+        (``GET /jobs/{id}/runs/{run_id}``, for up to 300 s) until its
+        ``ingest_status`` is no longer ``pending``, and get that fresh
+        snapshot back. This also holds when the call replays an earlier
+        answer for the same ``idempotency_key``. A run stopped while it
+        was ingesting comes back ``stopped`` once ingestion has wound
+        down, with only the rows written so far (``stats.total`` is cut
+        to match). Otherwise use ``run.wait()`` before reading results.
 
         Returns a :class:`RunHandle` for the newly-created run."""
         resp: RerunJobResponse = self._client._post_rerun(
@@ -802,9 +807,9 @@ class JobRef:
         )
         run = resp.latest_run
         if wait_for_ingest and run.ingest_status is IngestStatus.PENDING:
-            job = self._client._wait_for_ingest_raw(self.job_id, timeout=300.0, poll_interval=2.0)
-            if job.latest_run is not None and job.latest_run.run_id == run.run_id:
-                run = job.latest_run
+            run = self._client._wait_for_run_ingest_raw(
+                self.job_id, run.run_id, timeout=300.0, poll_interval=2.0
+            )
         return RunHandle(self._client, self.job_id, run.run_id, run)
 
     def retry_failed(

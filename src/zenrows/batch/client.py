@@ -334,8 +334,12 @@ class ZenRowsBatchClient:
         idempotency_key: str | None = None,
         wait_for_ingest: bool = False,
     ) -> JobRef:
-        """Submit a scheduled job. `wait_for_ingest` works as on
-        `submit_job`.
+        """Submit a scheduled job.
+
+        Creating a scheduled job starts no run (the first fire creates
+        Run 1), so there is nothing to ingest yet and
+        `wait_for_ingest=True` returns at once. It is accepted for
+        parity with `submit_job`.
 
         `schedule` is one of the typed builders (`At`, `Rate`,
         `Calendar`) or a raw `JobScheduleDict` for power users. The
@@ -1053,6 +1057,29 @@ class ZenRowsBatchClient:
                 initial_interval=poll_interval,
                 max_interval=max_poll_interval,
             )
+
+    def _wait_for_run_ingest_raw(
+        self,
+        job_id: str,
+        run_id: str,
+        *,
+        timeout: float,
+        poll_interval: float,
+        max_poll_interval: float = 15.0,
+    ) -> Run:
+        """Poll one run (`GET /jobs/{id}/runs/{run_id}`) until its
+        `ingest_status` is no longer `pending`, and return it. The run
+        status is not a shortcut: a run stopped mid-ingest keeps
+        `ingest_status: pending` until the ingest worker reaches its
+        next chunk, notices the stop, cuts `stats.total` to the rows
+        written and marks ingestion done."""
+        return poll_until(
+            fetch=lambda: self._get_run_data(job_id, run_id),
+            is_done=lambda run: run.ingest_status is not IngestStatus.PENDING,
+            timeout=timeout,
+            initial_interval=poll_interval,
+            max_interval=max_poll_interval,
+        )
 
     def _wait_for_ingest_raw(
         self,
