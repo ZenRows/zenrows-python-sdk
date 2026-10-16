@@ -134,7 +134,7 @@ record(
 )
 
 subs = [
-    ('"https://example.com/products/"', json.dumps(CRAWL_URL), "start URL → CRAWL_URL"),
+    ('"https://www.scrapingcourse.com/ecommerce/"', json.dumps(CRAWL_URL), "start URL → CRAWL_URL"),
     ("max_items=50,", "max_items=5,", "max_items 50 → 5"),
     ("max_pages=100,", "max_pages=10,", "max_pages 100 → 10 (at most 10)"),
     (
@@ -143,6 +143,17 @@ subs = [
         "include → CRAWL_INCLUDE",
     ),
 ]
+if API_BASE != "https://api.zenrows.com/v1":
+    # The quickstart leaves the base URL out, so it would reach production
+    # whatever CRAWL_API_BASE says. Point it where the rest of the run goes.
+    subs.append(
+        (
+            'ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"])',
+            'ZenRowsCrawlClient(api_key=os.environ["ZENROWS_API_KEY"], '
+            f"base_url={json.dumps(API_BASE)})",
+            "base URL → CRAWL_API_BASE",
+        )
+    )
 quick, applied = block or "", []
 for a, b, why in subs:
     if a in quick:
