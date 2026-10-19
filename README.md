@@ -30,6 +30,7 @@ This package ships three clients:
   - [PUT Requests](#put-requests)
   - [Concurrency](#concurrency)
   - [Extract](#extract)
+  - [Retries](#retries)
 - [Quickstart — Batch API (`ZenRowsBatchClient`)](#quickstart--batch-api-zenrowsbatchclient)
   - [Extract in a batch](#extract-in-a-batch)
   - [Upload URLs from a CSV](#upload-urls-from-a-csv)
@@ -57,14 +58,14 @@ Start using the API by [creating your API Key](https://www.zenrows.com/register?
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
-The client retries a request up to 2 times by default (`retries=2`), and only when another try can help: a `429`, `502`, `503` or `504` response, none of which is charged, or a failure to connect. It never retries any other status (including any `422`) or a read timeout, because the server may still be working on that request. Between tries it waits the server's `Retry-After` header, or else a random time between 0.25 seconds and `2 ** attempt` seconds (full jitter); either wait is capped at `retry_max_wait` (default 30 seconds). It starts no retry whose wait would end more than `retry_budget` seconds (default 90) after the first try. Pass `retries=0` to turn retries off.
+The client retries a failed request up to 2 times by default. Pass `retries=0` to send each request once. See [Retries](#retries) for what is retried and how long the client waits.
 
 `client.fetch()` is the primary method for the main page-scraping product; `client.get()` still works and is kept as a deprecated alias.
 
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY", retries=1)
+client = ZenRowsClient("YOUR-API-KEY")
 url = "https://www.zenrows.com/"
 
 response = client.fetch(url, params={
@@ -130,7 +131,7 @@ The SDK also offers POST requests by calling the `client.post` method. It can re
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY", retries=1)
+client = ZenRowsClient("YOUR-API-KEY")
 url = "https://httpbin.org/anything"
 
 response = client.post(url, data={
@@ -141,6 +142,8 @@ response = client.post(url, data={
 print(response.text)
 ```
 
+A POST is sent once, even when it fails with a status the client would retry for a GET. To let the client retry it, pass an `Idempotency-Key` header and a body it can send again; see [Retries](#retries).
+
 ### PUT Requests
 
 The SDK also offers PUT requests by calling the `client.put` method. It can receive a new parameter `data` that represents the data sent in, for example, a form. 
@@ -148,7 +151,7 @@ The SDK also offers PUT requests by calling the `client.put` method. It can rece
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY", retries=1)
+client = ZenRowsClient("YOUR-API-KEY")
 url = "https://httpbin.org/anything"
 
 response = client.put(url, data={
@@ -158,6 +161,8 @@ response = client.put(url, data={
 
 print(response.text)
 ```
+
+A PUT follows the same rule as a POST: it is retried only with an `Idempotency-Key` header and a body the client can send again.
 
 ### Concurrency
 
@@ -171,7 +176,7 @@ We use `asyncio.gather` in the example below. It will wait for all the calls to 
 from zenrows import ZenRowsClient
 import asyncio
 
-client = ZenRowsClient("YOUR-API-KEY", concurrency=5, retries=1)
+client = ZenRowsClient("YOUR-API-KEY", concurrency=5)
 
 async def main():
     urls = [
@@ -205,6 +210,50 @@ print(response.json())
 `extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
+
+### Retries
+
+> **Changed default.** Earlier versions did not retry unless you passed `retries`. The client now retries up to 2 times by default (`retries=2`). Pass `retries=0` to keep the old behaviour and send each request once.
+
+The client retries a request when another try can help:
+
+1. A `429`, `500`, `502`, `503` or `504` response.
+2. A `422` response, except Extract's `422` with `code: "no_data_extracted"`, which is a final answer.
+3. A failure to connect: connection refused, a name that does not resolve, or a connect timeout. The request never reached the server.
+
+It never retries these:
+
+1. Any other status, such as `400`, `401`, `402`, `403` or `404`.
+2. A read timeout, or a connection that closes after the request was sent. The server may still be working on that request, and may charge it.
+
+Which requests it retries:
+
+1. A GET is always eligible.
+2. A POST or PUT is eligible only when it carries an `Idempotency-Key` header and a body the client can send again: a string, bytes, a dict, or a file object that can seek. A generator, an iterator or another one-shot stream is never retried, because a second try would send it empty. Note that `headers` are forwarded to the target site, so the key reaches the target too.
+3. Any other request is sent once.
+
+How long it waits between tries:
+
+1. When the response has a `Retry-After` header in whole seconds, the client waits that long, at least 0.25 seconds and at most 30 seconds. The 30-second cap is fixed; `retry_max_wait` does not change it.
+2. Otherwise, or when `Retry-After` is an HTTP date, a fraction or any other value, it waits a random time between 0.25 seconds and `min(retry_max_wait, 2 ** attempt)` seconds, where `attempt` counts retries from 0. `retry_max_wait` defaults to 30 seconds. The wait is never shorter than 0.25 seconds.
+
+No retry starts after 90 s, counted from the call's first try (`retry_budget`, default 90). The budget does not cut a running try short, so a call can take longer than the budget by one try. `retries`, a `422` retry and a `5xx` retry share one count and one budget in the same call. In `extract(mode="auto")`, the Autoparse fallback gets its own retry count, but no retry of it starts after 90 s from the first request's first try.
+
+The client checks its options when you create it: `retries` must be an integer of 0 or more, and `retry_max_wait` and `retry_budget` must be finite numbers above 0. Anything else raises `ValueError`.
+
+A call cannot be cancelled. A wait between tries runs to its end, also for `fetch_async` and `extract_async`, which run the call on the client's thread pool.
+
+```python
+from zenrows import ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY", retries=3, retry_max_wait=10, retry_budget=60)
+
+response = client.post(
+    "https://httpbin.org/anything",
+    headers={"Idempotency-Key": "a-unique-key-per-order"},
+    data={"key1": "value1"},
+)
+```
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
 
