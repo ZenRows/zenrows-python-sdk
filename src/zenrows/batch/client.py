@@ -127,9 +127,7 @@ TERMINAL_EXPORT_STATUSES: frozenset[str] = frozenset(
 # configuration. The `base_url=` kwarg + `ZENROWS_BATCH_BASE_URL`
 # env var are present for advanced use only.
 DEFAULT_BASE_URL = "https://async.api.zenrows.com/v1"
-# Every client in this SDK sends the same User-Agent, so the API reads all
-# of them as Python SDK traffic.
-DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
+DEFAULT_USER_AGENT = f"zenrows-batch-python/{__version__}"
 
 M = TypeVar("M", bound=BaseModel)
 
