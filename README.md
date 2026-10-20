@@ -30,6 +30,7 @@ This package ships three clients:
   - [PUT Requests](#put-requests)
   - [Concurrency](#concurrency)
   - [Extract](#extract)
+    - [Preparing a domain](#preparing-a-domain)
   - [Retries](#retries)
 - [Quickstart — Batch API (`ZenRowsBatchClient`)](#quickstart--batch-api-zenrowsbatchclient)
   - [Extract in a batch](#extract-in-a-batch)
@@ -69,7 +70,7 @@ client = ZenRowsClient("YOUR-API-KEY")
 url = "https://www.zenrows.com/"
 
 response = client.fetch(url, params={
-    # Our algorithm allows to automatically extract content from any website
+    # Deprecated: use client.extract() for structured data instead
     "autoparse": False,
 
     # CSS Selectors for data extraction (i.e. {"links":"a @href"} to get href attributes from links)
@@ -209,6 +210,62 @@ print(response.json())
 
 `extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
 
+Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means Extract can't extract this page. Check `reason` in the problem body when present; older responses may not carry it:
+
+- `domain_not_prepared`: prepare the domain with `client.prepare_domain()` (see below), poll `client.prepared_domain_status()` until `status` is `"ready"`, then retry.
+- `page_not_recognised`: the domain is served, but this page isn't one Extract extracts (a home, search, login or category page). Try a product, article or listing page, or retry once in a few minutes. Preparing the domain again changes nothing.
+- `domain_not_enabled`: preparing doesn't help. Use `css_extractor`, or contact support.
+
+```python
+response = client.extract(url)
+if response.status_code == 403:
+    problem = response.json()
+    if problem.get("code") == "REQS007":
+        reason = problem.get("reason")  # None on older responses
+        if reason == "domain_not_prepared":
+            ...  # client.prepare_domain(...), then poll client.prepared_domain_status(...)
+        elif reason == "page_not_recognised":
+            ...  # try a product, article or listing page
+        elif reason == "domain_not_enabled":
+            ...  # use css_extractor, or contact support
+```
+
+The legacy `402` with `code: "AUTH010"` means the domain isn't enabled. `extract()` returns both error responses to you as is, in one request, and never retries them with autoparse. `fallback_to_autoparse` is deprecated and has no effect; passing `True` emits a `DeprecationWarning`.
+
+#### Preparing a domain
+
+`client.prepare_domain(domain, example_urls)` submits a domain for Extract (`POST /v1/extract/prepared-domains`), and `client.prepared_domain_status(domain)` reads where it is (`GET /v1/extract/prepared-domains/{domain}`). Both return the parsed status object. Pass the domain without a scheme and 1 to 5 example URLs, one per kind of page you want to extract. These calls cost no credits.
+
+Preparation takes minutes, and the client does not wait for it. Poll the status until it is no longer `"preparing"`:
+
+```python
+import time
+
+from zenrows import PreparedDomainError, ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY")
+
+try:
+    status = client.prepare_domain(
+        "www.scrapingcourse.com",
+        ["https://www.scrapingcourse.com/ecommerce/"],
+    )
+except PreparedDomainError as err:
+    # e.g. 409 in_progress, 429 out_of_allowance, 503 overloaded
+    print(err.status_code, err.code, err.detail)
+    raise
+
+while status["status"] == "preparing":
+    time.sleep(30)
+    status = client.prepared_domain_status("www.scrapingcourse.com")
+
+print(status["status"])  # "ready" or "failed" (see status["failure"])
+```
+
+`prepare_domain_async()` and `prepared_domain_status_async()` are the async counterparts. The client's `retries` setting doesn't apply to these calls, and an empty `domain` raises `ValueError` before any request.
+
+Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints) for every status and failure code.
+
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
 
 ### Retries
@@ -225,6 +282,7 @@ It never retries these:
 
 1. Any other status, such as `400`, `401`, `402`, `403` or `404`.
 2. A read timeout, or a connection that closes after the request was sent. The server may still be working on that request, and may charge it.
+3. A call to `prepare_domain()` or `prepared_domain_status()`. Their `429` and `503` are answers to read, so these calls are sent once; see [Preparing a domain](#preparing-a-domain).
 
 Which requests it retries:
 
@@ -237,7 +295,7 @@ How long it waits between tries:
 1. When the response has a `Retry-After` header in whole seconds, the client waits that long, at least 0.25 seconds and at most 30 seconds. The 30-second cap is fixed; `retry_max_wait` does not change it.
 2. Otherwise, or when `Retry-After` is an HTTP date, a fraction or any other value, it waits a random time between 0.25 seconds and `min(retry_max_wait, 2 ** attempt)` seconds, where `attempt` counts retries from 0. `retry_max_wait` defaults to 30 seconds. The wait is never shorter than 0.25 seconds.
 
-No retry starts after 90 s, counted from the call's first try (`retry_budget`, default 90). The budget does not cut a running try short, so a call can take longer than the budget by one try. `retries`, a `422` retry and a `5xx` retry share one count and one budget in the same call. In `extract(mode="auto")`, the Autoparse fallback gets its own retry count, but no retry of it starts after 90 s from the first request's first try.
+No retry starts after 90 s, counted from the call's first try (`retry_budget`, default 90). The budget does not cut a running try short, so a call can take longer than the budget by one try. `retries`, a `422` retry and a `5xx` retry share one count and one budget in the same call.
 
 The client checks its options when you create it: `retries` must be an integer of 0 or more, and `retry_max_wait` and `retry_budget` must be finite numbers above 0. Anything else raises `ValueError`.
 

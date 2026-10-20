@@ -18,12 +18,14 @@ import os
 import random
 import re
 import time
+import warnings
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
+from urllib.parse import quote
 
 import requests
 import urllib3
@@ -142,17 +144,13 @@ _call_state: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar(
 
 
 @contextmanager
-def _call_scope(started: float | None = None) -> Iterator[_CallState]:
-    """The current call's retry state, or a new one when there is none yet.
-
-    `started` opens a new state whose budget counts from that time instead
-    of now: Extract's Autoparse fallback gets its own retry count but no
-    fresh budget."""
+def _call_scope() -> Iterator[_CallState]:
+    """The current call's retry state, or a new one when there is none yet."""
     state = _call_state.get()
-    if state is not None and started is None:
+    if state is not None:
         yield state
         return
-    state = _CallState(started=_monotonic() if started is None else started)
+    state = _CallState(started=_monotonic())
     token = _call_state.set(state)
     try:
         yield state
@@ -281,19 +279,93 @@ def is_no_data_extracted(response: requests.Response) -> bool:
     return response.status_code == 422 and code is not None and code.lower() == _NO_DATA_EXTRACTED
 
 
-# Extract answers these when it can't serve the target domain: 403 REQS007
-# (domain not prepared yet) or the legacy 402 AUTH010 (domain not enabled).
-# extract(mode="auto") retries both once with Autoparse.
-_EXTRACT_DOMAIN_UNAVAILABLE = {(403, "REQS007"), (402, "AUTH010")}
+_FALLBACK_DEPRECATED = (
+    "fallback_to_autoparse is deprecated and has no effect: extract() no longer "
+    "retries with autoparse. On a 403 REQS007, check `reason` in the problem "
+    "body; for domain_not_prepared, prepare the domain with prepare_domain()."
+)
 
 
-def _is_extract_domain_unavailable(response: requests.Response) -> bool:
-    """True when the response is Extract saying it can't serve the target
-    domain yet (403 REQS007, or the legacy 402 AUTH010)."""
-    code = _error_code(response)
-    if code is None:
-        return False
-    return (response.status_code, code.upper()) in _EXTRACT_DOMAIN_UNAVAILABLE
+def _check_domain(domain: str) -> None:
+    # An empty domain would request the list endpoint and read its answer as
+    # a status, so it never leaves the client.
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError("domain must be a non-empty string")
+
+
+def _prepared_domains_request(method: str, url: str, **kwargs: Any) -> requests.Response:
+    # Not through `requests_session`: its retry adapter would retry a 429 or
+    # 503, which these endpoints use for answers to read (out_of_allowance,
+    # overloaded). The Go and Node SDKs skip client retries here too.
+    with requests.Session() as session:
+        return session.request(method, url, **kwargs)
+
+
+def _prepared_domain_body(response: requests.Response) -> dict:
+    if not response.ok:
+        raise PreparedDomainError.from_response(response)
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise PreparedDomainError(response.status_code, None)
+    return body
+
+
+class PreparedDomainError(Exception):
+    """A non-2xx answer from the prepared-domains endpoints
+    (`prepare_domain()` / `prepared_domain_status()`).
+
+    Branch on `status_code` + `code`; display `detail`, don't parse it.
+    `code` is the problem's `code` member, for example `invalid_argument`
+    (400), `not_found` (404), `in_progress` (409: a preparation is already
+    running, read its status instead of resubmitting), `out_of_allowance`
+    (429: no preparations left this month), or `overloaded` / `disabled`
+    (503); None when the body has no code. `problem` holds the whole body,
+    or None when it was not JSON.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        problem: dict | None,
+        *,
+        retry_after: float | None = None,
+    ):
+        self.status_code = status_code
+        self.problem = problem
+        # Seconds the server asked to wait (`Retry-After`), when it sent one.
+        self.retry_after = retry_after
+
+        def member(name: str) -> str | None:
+            value = problem.get(name) if problem else None
+            return value if isinstance(value, str) else None
+
+        self.code = member("code")
+        self.detail = member("detail")
+        self.reason = member("reason")
+        title = member("title") or "Prepared-domains request failed"
+        explanation = self.detail or self.code
+        super().__init__(f"{status_code} {title}" + (f": {explanation}" if explanation else ""))
+
+    @classmethod
+    def from_response(cls, response: requests.Response) -> "PreparedDomainError":
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        try:
+            retry_after: float | None = float(response.headers.get("Retry-After", ""))
+        except ValueError:
+            retry_after = None
+        if retry_after is not None and (not math.isfinite(retry_after) or retry_after < 0):
+            retry_after = None
+        return cls(
+            response.status_code,
+            body if isinstance(body, dict) else None,
+            retry_after=retry_after,
+        )
 
 
 # Adaptive Stealth Mode (wire `mode=auto`) picks js_render / premium_proxy
@@ -343,6 +415,9 @@ class ZenRowsClient:
     30). No retry starts after `retry_budget` seconds (default 90) from the
     call's first try. Pass `retries=0` to turn retries off. A call cannot be
     cancelled, so a wait between tries runs to its end.
+
+    `prepare_domain()` and `prepared_domain_status()` never retry: their 429
+    and 503 are answers to read.
     """
 
     # Kept as a class attribute for compatibility — pre-1.4 callers
@@ -423,7 +498,7 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
-        fallback_to_autoparse: bool = True,
+        fallback_to_autoparse: bool = False,
         adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
@@ -432,13 +507,28 @@ class ZenRowsClient:
         or "standard". Thin wrapper over `fetch()` with the `extract` param set:
         no separate endpoint or auth.
 
-        Extract works on any domain once Zenrows has prepared it, with any
-        active API key. A domain that isn't prepared yet answers 403 with
-        `code: "REQS007"` (prepare it with `POST /v1/extract/prepared-domains`);
-        the legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
-        On either, `mode="auto"` retries once with `autoparse=True` instead of
-        returning the error response. Pass `fallback_to_autoparse=False` to
-        disable that and get the raw error response back.
+        Extract works on any prepared domain (you can prepare one yourself
+        with `POST /v1/extract/prepared-domains`), with any active API key.
+        A 403 with `code: "REQS007"` means Extract can't extract this page.
+        Check `reason` in the problem body (`response.json().get("reason")`)
+        when present; older responses may not carry it:
+
+          - `domain_not_prepared`: prepare the domain with `prepare_domain()`,
+            poll `prepared_domain_status()` until `status` is `"ready"`, then
+            retry.
+          - `page_not_recognised`: the domain is served, but this page isn't
+            one Extract extracts (a home, search, login or category page).
+            Try a product, article or listing page, or retry once in a few
+            minutes. Preparing the domain again changes nothing.
+          - `domain_not_enabled`: preparing doesn't help. Use
+            `css_extractor`, or contact support.
+
+        The legacy domain-not-enabled code is a 402 with `code: "AUTH010"`.
+        Both error responses are returned to you as is, in one request.
+
+        `fallback_to_autoparse` is deprecated and has no effect: extract()
+        never retries with autoparse. Passing True emits a
+        `DeprecationWarning`.
 
         A 422 with `code: "no_data_extracted"` means Extract knows this kind
         of page but found no data on it. It is not charged and is never
@@ -446,29 +536,18 @@ class ZenRowsClient:
 
         `adaptive_stealth=True` (default) also sends Adaptive Stealth Mode
         (`mode: "auto"` at the wire-param level - unrelated to this method's own
-        `mode` argument) on both the extract attempt and the Autoparse fallback,
-        so a target needing `js_render`/`premium_proxy` gets escalated
+        `mode` argument), so a target needing `js_render`/`premium_proxy` gets escalated
         automatically instead of failing with REQS002. It is skipped when
         `params` sets `js_render` or `premium_proxy` (the API rejects either
         combined with Adaptive Stealth Mode) or its own wire `mode`. Pass
         `adaptive_stealth=False` to turn it off entirely.
         """
+        if fallback_to_autoparse:
+            warnings.warn(_FALLBACK_DEPRECATED, DeprecationWarning, stacklevel=2)
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         _with_adaptive_stealth(final_params, adaptive_stealth)
-        # One call: the Autoparse fallback gets its own retry count, but its
-        # budget counts from the first request's first try.
-        with _call_scope() as state:
-            response = self.fetch(url, final_params, headers, **kwargs)
-
-        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
-            autoparse_params = dict(params) if params else {}
-            autoparse_params["autoparse"] = True
-            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
-            with _call_scope(started=state.started):
-                return self.fetch(url, autoparse_params, headers, **kwargs)
-
-        return response
+        return self.fetch(url, final_params, headers, **kwargs)
 
     def post(
         self,
@@ -489,6 +568,64 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         return self._worker("PUT", url, params, headers, data=data, **kwargs)
+
+    # ---- Extract prepared domains ----
+
+    def prepare_domain(self, domain: str, example_urls: list[str]) -> dict:
+        """Submit `domain` for Extract preparation
+        (`POST /v1/extract/prepared-domains`) and return the parsed status
+        object the API answers with `202`: `domain`, `status` (`preparing`,
+        `ready` or `failed`), `state`, `submitted_at`, `updated_at`.
+
+        `domain` is the domain without a scheme. `example_urls` are 1 to 5
+        URLs on that domain, one per kind of page you want to extract.
+        Submitting a domain that is already prepared returns its current
+        status instead of starting a new run.
+
+        Preparation takes minutes. This method does not wait for it: call
+        `prepared_domain_status(domain)` until `status` is no longer
+        `"preparing"`. These endpoints don't fetch pages and cost no
+        credits.
+
+        The client's `retries` setting doesn't apply to these endpoints.
+        Raises `ValueError` for an empty `domain`, before any request, and
+        `PreparedDomainError` on a non-2xx answer, for example 400
+        `invalid_argument`, 409 `in_progress`, 429 `out_of_allowance` or
+        503 `overloaded` / `disabled`.
+        """
+        _check_domain(domain)
+        response = _prepared_domains_request(
+            "POST",
+            self._prepared_domains_url(),
+            json={"domain": domain, "example_urls": list(example_urls)},
+            headers=self._prepared_domains_headers(),
+        )
+        return _prepared_domain_body(response)
+
+    def prepared_domain_status(self, domain: str) -> dict:
+        """Read the preparation status of `domain`
+        (`GET /v1/extract/prepared-domains/{domain}`) and return the parsed
+        status object. `status` is `preparing`, `ready` or `failed`; a
+        failed preparation carries a `failure` object with `code`, `detail`
+        and `slot_consumed`. `state` and `roles` report progress.
+
+        Raises `ValueError` for an empty `domain`, before any request, and
+        `PreparedDomainError` on a non-2xx answer, for example 404
+        `not_found` when your account never submitted `domain`.
+        """
+        _check_domain(domain)
+        response = _prepared_domains_request(
+            "GET",
+            f"{self._prepared_domains_url()}/{quote(domain, safe='')}",
+            headers=self._prepared_domains_headers(),
+        )
+        return _prepared_domain_body(response)
+
+    def _prepared_domains_url(self) -> str:
+        return self.api_url.rstrip("/") + "/extract/prepared-domains"
+
+    def _prepared_domains_headers(self) -> dict:
+        return {"X-API-Key": self.apikey, "User-Agent": DEFAULT_USER_AGENT}
 
     # ---- async-flavoured wrappers (thread-pool offload) ----
 
@@ -517,29 +654,34 @@ class ZenRowsClient:
         params: dict | None = None,
         headers: dict | None = None,
         mode: str = "auto",
-        fallback_to_autoparse: bool = True,
+        fallback_to_autoparse: bool = False,
         adaptive_stealth: bool = True,
         **kwargs: Any,
     ) -> requests.Response:
         """Async counterpart of `extract()` - see its docstring for the
-        REQS007 / AUTH010 -> Autoparse fallback behavior,
-        `fallback_to_autoparse`, and `adaptive_stealth`."""
+        REQS007 `reason` cases, the deprecated `fallback_to_autoparse`, and
+        `adaptive_stealth`."""
+        if fallback_to_autoparse:
+            warnings.warn(_FALLBACK_DEPRECATED, DeprecationWarning, stacklevel=2)
         final_params = dict(params) if params else {}
         final_params["extract"] = mode
         _with_adaptive_stealth(final_params, adaptive_stealth)
-        # One call, as in `extract`. `_offload` carries the scope to the
-        # worker thread.
-        with _call_scope() as state:
-            response = await self.fetch_async(url, final_params, headers, **kwargs)
+        return await self.fetch_async(url, final_params, headers, **kwargs)
 
-        if mode == "auto" and fallback_to_autoparse and _is_extract_domain_unavailable(response):
-            autoparse_params = dict(params) if params else {}
-            autoparse_params["autoparse"] = True
-            _with_adaptive_stealth(autoparse_params, adaptive_stealth)
-            with _call_scope(started=state.started):
-                return await self.fetch_async(url, autoparse_params, headers, **kwargs)
+    async def prepare_domain_async(self, domain: str, example_urls: list[str]) -> dict:
+        """Async counterpart of `prepare_domain()`, run on the client's thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self.executor, partial(self.prepare_domain, domain, example_urls)
+        )
 
-        return response
+    async def prepared_domain_status_async(self, domain: str) -> dict:
+        """Async counterpart of `prepared_domain_status()`, run on the client's
+        thread pool."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self.executor, partial(self.prepared_domain_status, domain)
+        )
 
     async def post_async(
         self,
@@ -585,12 +727,9 @@ class ZenRowsClient:
         **kwargs: Any,
     ) -> requests.Response:
         loop = asyncio.get_event_loop()
-        # Run in a copy of this context, so the worker thread sees the
-        # caller's retry state (see `extract_async`).
-        context = contextvars.copy_context()
         return await loop.run_in_executor(
             self.executor,
-            partial(context.run, self._worker, method, url, params, headers, **kwargs),
+            partial(self._worker, method, url, params, headers, **kwargs),
         )
 
     def _worker(

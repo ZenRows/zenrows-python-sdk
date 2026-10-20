@@ -23,7 +23,7 @@ import pytest
 import requests
 from requests.adapters import HTTPAdapter
 
-from zenrows import ZenRowsClient, is_no_data_extracted
+from zenrows import PreparedDomainError, ZenRowsClient, is_no_data_extracted
 from zenrows.client import _jitter, _JitteredRetry, _retry_after_seconds
 
 APIKEY = "APIKEY"
@@ -685,81 +685,67 @@ def test_extract_retries_another_422(server: _Server, sleeps: list[float]) -> No
     assert server.calls == 2
 
 
-def test_autoparse_fallback_is_unchanged(server: _Server, sleeps: list[float]) -> None:
-    server.script = [(403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
+def test_extract_returns_a_403_as_is_in_one_request(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(403, {"Retry-After": "1"}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
 
     response = client(server).extract(TARGET)
 
-    assert response.status_code == 200
-    assert server.calls == 2
-    assert server.queries[0]["extract"] == ["auto"]
-    assert server.queries[1]["autoparse"] == ["True"]
-    assert "extract" not in server.queries[1]
+    assert response.status_code == 403
+    assert server.calls == 1
     assert sleeps == []
 
 
-def test_autoparse_fallback_is_unchanged_async(server: _Server, sleeps: list[float]) -> None:
-    server.script = [(403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
-
-    response = asyncio.run(client(server).extract_async(TARGET))
-
-    assert response.status_code == 200
-    assert server.calls == 2
-    assert server.queries[1]["autoparse"] == ["True"]
+# ---- async calls ----
 
 
-def test_extract_retries_a_503_before_the_fallback(server: _Server, sleeps: list[float]) -> None:
-    server.script = [(503, {}, b""), (403, {}, DOMAIN_NOT_PREPARED), (200, {}, b"{}")]
+def test_fetch_async_shares_one_retry_count(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(503, {}, b""), (422, {}, NO_CONTENT), (422, {}, NO_CONTENT), (200, {}, b"ok")]
 
-    response = client(server).extract(TARGET)
+    response = asyncio.run(client(server).fetch_async(TARGET))
 
-    assert response.status_code == 200
+    # Two retries in all, on the client's thread pool too.
+    assert response.status_code == 422
     assert server.calls == 3
-    assert len(sleeps) == 1
-    assert server.queries[2]["autoparse"] == ["True"]
+    assert len(sleeps) == 2
 
 
-@pytest.mark.parametrize("use_async", [False, True])
-def test_autoparse_fallback_shares_the_budget(
-    server: _Server, clock: tuple[_Clock, list[float]], use_async: bool
-) -> None:
+def test_fetch_async_budget_is_per_call(server: _Server, clock: tuple[_Clock, list[float]]) -> None:
     _, sleeps = clock
-    server.script = [
-        (503, {"Retry-After": "30"}, b""),
-        (403, {}, DOMAIN_NOT_PREPARED),
-        (503, {"Retry-After": "30"}, b""),
-        (200, {}, b"{}"),
-    ]
-    zr = client(server, retry_budget=50.0)
+    zr = client(server, retries=1, retry_budget=40.0)
 
-    response = asyncio.run(zr.extract_async(TARGET)) if use_async else zr.extract(TARGET)
+    async def two_calls() -> list[int]:
+        statuses = []
+        for _ in range(2):
+            server.script = [(503, {"Retry-After": "30"}, b""), (200, {}, b"ok")]
+            statuses.append((await zr.fetch_async(TARGET)).status_code)
+        return statuses
 
-    # The first wait ends at 30 s. A fresh budget would let the fallback
-    # wait until 30 s after its own start; the shared one ends it at 50 s.
-    assert response.status_code == 503
-    assert server.calls == 3
-    assert server.queries[2]["autoparse"] == ["True"]
-    assert sleeps == [30.0]
+    # A budget shared across calls would stop the second retry at 60 s > 40 s.
+    assert asyncio.run(two_calls()) == [200, 200]
+    assert sleeps == [30.0, 30.0]
 
 
+# ---- prepared domains ----
+
+
+@pytest.mark.parametrize("status", [429, 503])
 @pytest.mark.parametrize("use_async", [False, True])
-def test_autoparse_fallback_gets_its_own_retry_count(
-    server: _Server, sleeps: list[float], use_async: bool
+@pytest.mark.parametrize("call", ["prepare_domain", "prepared_domain_status"])
+def test_prepared_domain_requests_are_never_retried(
+    server: _Server, sleeps: list[float], status: int, use_async: bool, call: str
 ) -> None:
-    server.script = [
-        (503, {}, b""),
-        (503, {}, b""),
-        (403, {}, DOMAIN_NOT_PREPARED),
-        (503, {}, b""),
-        (200, {}, b"{}"),
-    ]
-    zr = client(server)
+    server.script = [(status, {"Retry-After": "1"}, b'{"code": "busy"}'), (200, {}, b"{}")]
+    zr = client(server, retries=3)
+    args = ("example.com", [TARGET]) if call == "prepare_domain" else ("example.com",)
+    method = getattr(zr, f"{call}_async" if use_async else call)
 
-    response = asyncio.run(zr.extract_async(TARGET)) if use_async else zr.extract(TARGET)
+    with pytest.raises(PreparedDomainError) as caught:
+        asyncio.run(method(*args)) if use_async else method(*args)
 
-    assert response.status_code == 200
-    assert server.calls == 5
-    assert len(sleeps) == 3
+    # The first answer is the result: no second request and no wait.
+    assert caught.value.status_code == status
+    assert server.calls == 1
+    assert sleeps == []
 
 
 # ---- is_no_data_extracted ----
