@@ -46,6 +46,7 @@ from zenrows.batch.models import (
     AddTasksResponse,
     Export,
     ExportStatus,
+    IngestStatus,
     Job,
     JobStatus,
     RerunJobResponse,
@@ -128,7 +129,12 @@ class RunRef:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
+        """Write every matching task's body to ``target_dir``, one file
+        per task. Returns the number of files written. Failed and
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_dir(
             self.job_id,
             self.run_id,
@@ -140,6 +146,7 @@ class RunRef:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
+            on_skip=on_skip,
         )
 
     def download_to_memory(
@@ -151,7 +158,11 @@ class RunRef:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> "list[DownloadedResult]":
+        """Load every matching task's body into memory. Failed and
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_memory(
             self.job_id,
             self.run_id,
@@ -161,6 +172,7 @@ class RunRef:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
+            on_skip=on_skip,
         )
 
     # ----- single-task download -----
@@ -186,10 +198,13 @@ class RunRef:
         timeout: float = 300.0,
         poll_interval: float = 2.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> "RunHandle":
         """Block until this run reaches a target state. Returns a fresh
         loaded :class:`RunHandle` so chains like
-        ``run.wait().download_to_dir(...)`` work without re-wrapping."""
+        ``run.wait().download_to_dir(...)`` work without re-wrapping.
+        A paused run raises :class:`RunPaused` unless
+        ``wait_while_paused=True``."""
         run = self._client._wait_for_run_raw(
             self.job_id,
             run_id=self.run_id,
@@ -198,6 +213,7 @@ class RunRef:
             timeout=timeout,
             poll_interval=poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
         return RunHandle(self._client, self.job_id, self.run_id, run)
 
@@ -226,9 +242,9 @@ class RunRef:
         the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps one export at 100 GiB of results. For a larger
+        run use ``download_to_dir``: it has no export cap, but is slower
+        (one body at a time, tunable via ``concurrency=``)."""
         return self._client.download_all_results(
             self.job_id,
             self.run_id,
@@ -279,7 +295,8 @@ class ExportRef:
     A results export is async: ``start_export()`` returns immediately
     with a ``pending`` ref; the server zips the run in the background
     and it reaches ``completed`` (download URL ready) or ``failed``
-    (with an ``error`` message — e.g. the 1 GiB size cap). Call
+    (with an ``error`` message, e.g. the run is over the 100 GiB
+    export cap). Call
     ``load()`` / ``wait()`` for an :class:`ExportHandle` with data.
     """
 
@@ -485,12 +502,15 @@ class CurrentRun:
         timeout: float = 300.0,
         poll_interval: float = 2.0,
         progress: bool = False,
+        wait_while_paused: bool = False,
     ) -> "RunHandle":
         """Block until the current run reaches a target state. Returns a
         loaded :class:`RunHandle`, so chains like
         ``job.run.wait().download_to_dir(...)`` work cleanly.
 
-        See ``ZenRowsBatchClient.wait_for_run`` for the full contract."""
+        A paused run raises :class:`RunPaused` instead of being polled
+        until ``timeout``, unless ``wait_while_paused=True``. See
+        ``ZenRowsBatchClient.wait_for_run`` for the full contract."""
         run = self._client._wait_for_run_raw(
             self.job_id,
             run_id=None,
@@ -499,6 +519,7 @@ class CurrentRun:
             timeout=timeout,
             poll_interval=poll_interval,
             progress=progress,
+            wait_while_paused=wait_while_paused,
         )
         return RunHandle(self._client, self.job_id, run.run_id, run)
 
@@ -525,7 +546,12 @@ class CurrentRun:
         progress: bool = False,
         max_files: int | None = None,
         max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> int:
+        """Write every matching task's body to ``target_dir``, one file
+        per task. Returns the number of files written. Failed and
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_dir(
             self.job_id,
             None,
@@ -537,6 +563,7 @@ class CurrentRun:
             progress=progress,
             max_files=max_files,
             max_bytes_per_file=max_bytes_per_file,
+            on_skip=on_skip,
         )
 
     def download_to_memory(
@@ -548,7 +575,11 @@ class CurrentRun:
         max_count: int | None = None,
         max_total_bytes: int | None = None,
         max_bytes_per_file: int | None = None,
+        on_skip: Callable[[TaskResult], None] | None = None,
     ) -> "list[DownloadedResult]":
+        """Load every matching task's body into memory. Failed and
+        ``expired`` rows have no body: they are skipped and passed to
+        ``on_skip`` when you set it."""
         return self._client._download_memory(
             self.job_id,
             None,
@@ -558,6 +589,7 @@ class CurrentRun:
             max_count=max_count,
             max_total_bytes=max_total_bytes,
             max_bytes_per_file=max_bytes_per_file,
+            on_skip=on_skip,
         )
 
     # ----- single-task download -----
@@ -594,9 +626,9 @@ class CurrentRun:
         and save the zip to ``target_path``. See
         ``ZenRowsBatchClient.download_all_results`` for the contract.
 
-        Capped at 1 GiB per run server-side; for larger runs use
-        ``download_to_dir`` (no size limit, but slower — one body at a
-        time, tunable via ``concurrency=``)."""
+        The server caps one export at 100 GiB of results. For a larger
+        run use ``download_to_dir``: it has no export cap, but is slower
+        (one body at a time, tunable via ``concurrency=``)."""
         return self._client.download_all_results(
             self.job_id,
             self._current_run_id(),
@@ -741,6 +773,7 @@ class JobRef:
         *,
         status: str | list[str] | None = None,
         idempotency_key: str | None = None,
+        wait_for_ingest: bool = False,
     ) -> "RunHandle":
         """``POST /jobs/{id}/rerun[?status=...]`` — start a new run.
 
@@ -751,19 +784,40 @@ class JobRef:
         With ``status`` (single value like ``"failed"`` or list like
         ``["failed", "pending"]``): partial retry — matching statuses
         are reset to ``pending`` and re-enqueued; everything else is
-        inherited verbatim with ``source_run_id`` stamped.
+        inherited verbatim with ``source_run_id`` stamped. A partial
+        retry works within 10 days of the start of the run it retries;
+        after that the API answers 409 ``partial_rerun_window_expired``
+        and only a full rerun works.
+
+        Every rerun is accepted asynchronously (``202``): the new run's
+        task rows keep arriving until ``ingest_status`` is ``done``, so
+        ``results()`` read straight away can be partial. Pass
+        ``wait_for_ingest=True`` to poll the run this call returned
+        (``GET /jobs/{id}/runs/{run_id}``, for up to 300 s) until its
+        ``ingest_status`` is no longer ``pending``, and get that fresh
+        snapshot back. This also holds when the call replays an earlier
+        answer for the same ``idempotency_key``. A run stopped while it
+        was ingesting comes back ``stopped`` once ingestion has wound
+        down, with only the rows written so far (``stats.total`` is cut
+        to match). Otherwise use ``run.wait()`` before reading results.
 
         Returns a :class:`RunHandle` for the newly-created run."""
         resp: RerunJobResponse = self._client._post_rerun(
             self.job_id, status=status, idempotency_key=idempotency_key
         )
-        return RunHandle(self._client, self.job_id, resp.latest_run.run_id, resp.latest_run)
+        run = resp.latest_run
+        if wait_for_ingest and run.ingest_status is IngestStatus.PENDING:
+            run = self._client._wait_for_run_ingest_raw(
+                self.job_id, run.run_id, timeout=300.0, poll_interval=2.0
+            )
+        return RunHandle(self._client, self.job_id, run.run_id, run)
 
     def retry_failed(
         self,
         *,
         include_pending: bool = False,
         idempotency_key: str | None = None,
+        wait_for_ingest: bool = False,
     ) -> "RunHandle":
         """Start a new run that re-executes only the previous run's
         **failed** tasks (partial retry). Successful tasks
@@ -775,6 +829,9 @@ class JobRef:
         started (``status="failed,pending"``) — the usual move after a
         ``stop()`` left orphan ``pending`` rows.
 
+        ``wait_for_ingest=True`` returns only once the new run's task
+        rows are all written, as on :meth:`rerun`.
+
         Returns a :class:`RunHandle` for the new run. Requires the
         previous run to be terminal (``completed`` / ``stopped`` /
         ``failed``); raises
@@ -782,13 +839,30 @@ class JobRef:
         (409 ``no_matching_tasks``) when nothing matched the filter.
         """
         statuses = ["failed", "pending"] if include_pending else "failed"
-        return self.rerun(status=statuses, idempotency_key=idempotency_key)
+        return self.rerun(
+            status=statuses, idempotency_key=idempotency_key, wait_for_ingest=wait_for_ingest
+        )
 
     # ----- tasks (write path) -----
 
-    def add_tasks(self, body: AddTasksRequest | AddTasksDict) -> AddTasksResponse:
-        """``POST /jobs/{id}/tasks`` — append to the open initial run."""
-        return self._client._post_tasks(self.job_id, body)
+    def add_tasks(
+        self,
+        body: AddTasksRequest | AddTasksDict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> AddTasksResponse:
+        """``POST /jobs/{id}/tasks``: append up to 10,000 tasks to the
+        open initial run.
+
+        Pass ``idempotency_key`` (up to 128 characters, unique per
+        logical call) to make the call safe to retry. Within 24 hours,
+        a repeat with the same key and body returns the first answer
+        instead of adding the tasks again, and the client then retries
+        transient failures (network errors, 429, 502, 503, 504) on its
+        own. A repeat with a different body, or one sent while the first
+        call is still running, raises 409 ``idempotency_key_conflict``.
+        Without a key every call appends its tasks and is sent once."""
+        return self._client._post_tasks(self.job_id, body, idempotency_key=idempotency_key)
 
     # ----- runs (list) -----
 
@@ -856,26 +930,39 @@ class JobRef:
         Large submissions return ``202 Accepted`` and stream task rows
         into storage off the request path; until that finishes,
         results pages may be partial and ``add_tasks`` on an open job
-        is rejected with 409. This polls ``GET /jobs/{id}`` until
-        ``latest_run.ingest_status`` leaves ``pending`` (also satisfied
-        by a terminal run — a mid-ingest stop flips the field to
-        ``done``). Runs that never ingested asynchronously (any 201
-        submission) are done on the first poll.
+        is rejected with 409. This polls until the run's
+        ``ingest_status`` is no longer ``pending``. On a ref from a
+        ``submit_*`` call it polls the run that submit returned
+        (``GET /jobs/{id}/runs/{run_id}``), so a replayed submit never
+        follows a newer run; otherwise it polls the job's latest run.
+        The run status does not end the wait: a run stopped mid-ingest
+        is terminal at once but keeps ``ingest_status: pending`` until
+        the API has settled its rows and cut ``stats.total`` to match.
+        Runs that never ingested asynchronously (any 201 submission)
+        are done on the first poll.
 
         Raises ``WaiterTimeout`` after ``timeout`` seconds. Returns the
         fresh loaded handle, so chains like
         ``job.wait_for_ingest().add_tasks(...)`` work. Or opt in at
         submit time via ``submit_job(..., wait_for_ingest=True)``."""
-        return JobHandle(
-            self._client,
-            self.job_id,
-            self._client._wait_for_ingest_raw(
+        submitted = self.submit_response.latest_run if self.submit_response else None
+        if submitted is not None:
+            self._client._wait_for_run_ingest_raw(
+                self.job_id,
+                submitted.run_id,
+                timeout=timeout,
+                poll_interval=poll_interval,
+                max_poll_interval=max_poll_interval,
+            )
+            data = self._client._get_job_data(self.job_id)
+        else:
+            data = self._client._wait_for_ingest_raw(
                 self.job_id,
                 timeout=timeout,
                 poll_interval=poll_interval,
                 max_poll_interval=max_poll_interval,
-            ),
-        )
+            )
+        return JobHandle(self._client, self.job_id, data, submit_response=self.submit_response)
 
 
 class JobHandle(JobRef):

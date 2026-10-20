@@ -22,7 +22,7 @@ Run with:
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from zenrows import ZenRowsBatchClient
 from zenrows.batch import At, Calendar, JobHandle, Monthly, Rate, Weekly
@@ -81,13 +81,17 @@ def main() -> None:
     )
     print(f"created {monthly.job_id} — 1st + 15th at midnight UTC")
 
-    # At: a single future fire (naive local datetime + timezone).
+    # At: a single future fire (naive local datetime + timezone). The
+    # time must be in the future, so this picks 09:00 thirty days from now.
+    launch = (datetime.now() + timedelta(days=30)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
     oneshot = client.submit_scheduled(
-        At(datetime(2026, 9, 1, 9, 0), timezone="Europe/Berlin"),
+        At(launch, timezone="Europe/Berlin"),
         ["https://example.com/launch-day"],
         name="launch-day",
     )
-    print(f"created {oneshot.job_id} — one-shot 2026-09-01 09:00 Berlin")
+    print(f"created {oneshot.job_id}: one-shot {launch:%Y-%m-%d %H:%M} Berlin")
 
     # --- 3. Manage the schedule (via the `job.schedule` facet) ----------
     # Pause: the schedule keeps ticking server-side but fires are dropped

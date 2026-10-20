@@ -1,7 +1,7 @@
 """06: Retry only the failed tasks of a finished run.
 
 `job.retry_failed()` starts a fresh run that re-executes ONLY the
-previous run's failed tasks (partial retry, SPEC §3.5). Successful
+previous run's failed tasks (partial retry). Successful
 tasks are inherited verbatim — you don't pay to re-scrape them, and
 the new run's totals already carry the prior successes. Pass
 `include_pending=True` to also re-enqueue tasks that never started
@@ -11,7 +11,9 @@ the new run's totals already carry the prior successes. Pass
 Requires the previous run to be terminal (`completed` / `stopped` /
 `failed`);
 otherwise the API returns `409 run_not_terminal` — call
-`job.run.stop()` first if it's still live.
+`job.run.stop()` first if it's still live. A partial retry works within
+10 days of the start of the run it retries; after that the API returns
+`409 partial_rerun_window_expired` and only a full `job.rerun()` works.
 
 Run with:
     export ZENROWS_API_KEY=zr_...
@@ -22,7 +24,7 @@ import argparse
 import os
 
 from zenrows import ZenRowsBatchClient
-from zenrows.batch import BatchAPIError
+from zenrows.batch import BatchAPIError, BatchErrorCode
 
 
 def main() -> None:
@@ -46,6 +48,9 @@ def main() -> None:
     try:
         run = job.retry_failed(include_pending=args.include_pending)
     except BatchAPIError as e:
+        if e.code == BatchErrorCode.PARTIAL_RERUN_WINDOW_EXPIRED:
+            print("too late for a partial retry; use job.rerun() to run every task again")
+            return
         # e.g. no_matching_tasks (nothing failed) or run_not_terminal.
         print(f"retry skipped: {e.code}")
         return
