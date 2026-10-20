@@ -13,6 +13,7 @@ import respx
 from httpx import Response
 
 from zenrows import ZenRowsCrawlClient
+from zenrows.__version__ import __version__
 from zenrows.batch._open_enum import is_unknown
 from zenrows.crawl import (
     CRAWL_NOT_ENABLED_CODE,
@@ -107,6 +108,7 @@ def test_create_sends_only_required_fields(client: ZenRowsCrawlClient):
     assert crawl.depth is None  # created without depth: no depth limit, none echoed
     sent = route.calls.last.request
     assert sent.headers["X-API-Key"] == API_KEY
+    assert sent.headers["User-Agent"] == f"zenrows/{__version__} python"
     assert sent.headers["Content-Type"] == "application/json"
     assert "Idempotency-Key" not in sent.headers
     assert json.loads(sent.content) == {"url": "https://example.com/"}
