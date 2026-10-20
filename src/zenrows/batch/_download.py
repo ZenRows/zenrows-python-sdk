@@ -28,6 +28,14 @@ so we never page faster than we drain.
 `progress=True` installs a `rich.progress` bar if `rich` is
 importable; falls back to no-op if it isn't (so the SDK works in
 minimal envs without a hard dep).
+
+Rows with no body to fetch are skipped by the bulk helpers: failed
+tasks, and successful tasks whose result is past the job's retention
+window (14 days by default), which the API returns as `expired` even
+under a `status="successful"` filter. Pass `on_skip=` to be called
+with each of those rows; a WARNING on `zenrows.batch.download` gives the
+counts. Any other row without a `result_url` still raises, so a result
+never goes missing silently.
 """
 
 import os
@@ -41,8 +49,15 @@ from typing import IO, Any, Protocol
 
 import httpx
 
+from zenrows.batch._logging import logger
 from zenrows.batch.errors import BatchAPIError
 from zenrows.batch.models import TaskResult, TaskStatus
+
+_log = logger("download")
+
+# Statuses whose rows never have a body to fetch: a failed task, or a
+# successful one whose result aged out of the retention window.
+_NO_BODY_STATUSES = frozenset({TaskStatus.FAILED, TaskStatus.EXPIRED})
 
 
 class _BodyFetcher(Protocol):
@@ -107,8 +122,13 @@ def download_to_dir(
     progress: bool = False,
     max_files: int = DEFAULT_MAX_FILES,
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> int:
     """Stream every task's body into `target_dir`. Returns the count.
+
+    Failed and `expired` rows have no body: they are skipped, passed
+    to `on_skip` when you set it, and don't count toward
+    `max_files`.
 
     `concurrency` parallelises the body-fetch + write. With the
     default 1, behaviour is exactly serial. With N>1, up to N bodies
@@ -154,6 +174,7 @@ def download_to_dir(
         max_rows=max_files,
         max_rows_limit_name="max_files",
         progress_description="downloading to disk",
+        on_skip=on_skip,
     )
 
 
@@ -237,10 +258,15 @@ def _fetch_result_url(task: TaskResult) -> tuple[bytes, str]:
     """GET a task's presigned `result_url` directly — no API round-trip
     and no auth header (it's a signed storage URL). Returns
     `(body, content_type)`. Raises `ValueError` when the task carries no
-    result (e.g. a failed task)."""
+    result (a failed or `expired` task)."""
     if not task.result_url:
+        if task.status is TaskStatus.EXPIRED:
+            raise ValueError(
+                f"task {task.task_id!r} has expired: its result is past the "
+                "job's retention window and can no longer be downloaded"
+            )
         raise ValueError(
-            f"task {task.task_id!r} has no result_url — "
+            f"task {task.task_id!r} has no result_url: "
             "only successful tasks have a downloadable body"
         )
     with httpx.Client(timeout=httpx.Timeout(60.0)) as bare:
@@ -283,8 +309,13 @@ def download_to_memory(
     max_count: int = DEFAULT_MAX_COUNT_IN_MEMORY,
     max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES_IN_MEMORY,
     max_bytes_per_file: int = DEFAULT_MAX_BYTES_PER_FILE,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> list[DownloadedResult]:
     """Load every (matching) task body into a list and return it.
+
+    Failed and `expired` rows have no body: they are skipped, passed
+    to `on_skip` when you set it, and don't count toward
+    `max_count`.
 
     Three independent caps that all raise `DownloadLimitExceeded`:
       - `max_count` — how many rows total
@@ -325,6 +356,7 @@ def download_to_memory(
         max_rows=max_count,
         max_rows_limit_name="max_count",
         progress_description="downloading to memory",
+        on_skip=on_skip,
     )
     return out
 
@@ -344,16 +376,74 @@ def _run_bulk(
     max_rows: int,
     max_rows_limit_name: str,
     progress_description: str,
+    on_skip: Callable[[TaskResult], None] | None = None,
 ) -> int:
     """Iterate results + apply `per_row` to each, with optional
     parallelism + progress bar.
 
-    Returns the number of rows processed.
+    Returns the number of rows processed. Rows with no body (see
+    `_with_bodies`) never reach `per_row` and don't count.
 
     Cap checking is done *here* rather than in `per_row` so the
     count is authoritative even when the closures run out of order.
     """
-    rows = client._iter_results_raw(job_id, run_id=run_id, status=status)
+    counts: dict[str, int] = {}
+    rows = _with_bodies(
+        client._iter_results_raw(job_id, run_id=run_id, status=status),
+        on_skip=on_skip,
+        counts=counts,
+    )
+    try:
+        return _drive(
+            rows,
+            per_row=per_row,
+            concurrency=concurrency,
+            progress=progress,
+            max_rows=max_rows,
+            max_rows_limit_name=max_rows_limit_name,
+            progress_description=progress_description,
+        )
+    finally:
+        if counts:
+            _log.warning(
+                "skipped %d result(s) with no body to download (%s)",
+                sum(counts.values()),
+                ", ".join(f"{n} {st}" for st, n in sorted(counts.items())),
+                extra={"skipped": dict(counts)},
+            )
+
+
+def _with_bodies(
+    rows: Iterable[TaskResult],
+    *,
+    on_skip: Callable[[TaskResult], None] | None,
+    counts: dict[str, int],
+) -> Iterator[TaskResult]:
+    """Drop the rows that have no body: no `result_url` and a status of
+    `failed` or `expired`. Each one is passed to `on_skip` (when set)
+    and counted per status in `counts`. Every other row passes through,
+    so a `successful` row without a URL still fails loudly in the fetch.
+    Runs on the iterating thread, so `on_skip` is never called
+    concurrently."""
+    for row in rows:
+        if not row.result_url and row.status in _NO_BODY_STATUSES:
+            if on_skip is not None:
+                on_skip(row)
+            counts[row.status.value] = counts.get(row.status.value, 0) + 1
+            continue
+        yield row
+
+
+def _drive(
+    rows: Iterable[TaskResult],
+    *,
+    per_row: Callable[[TaskResult], int],
+    concurrency: int,
+    progress: bool,
+    max_rows: int,
+    max_rows_limit_name: str,
+    progress_description: str,
+) -> int:
 
     with _maybe_progress(progress, progress_description) as advance:
         if concurrency <= 1:

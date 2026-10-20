@@ -690,7 +690,7 @@ def _ingest_job_json(ingest_status: str | None) -> dict:
 @respx.mock
 def test_submit_wait_for_ingest_polls_202_until_done(client: ZenRowsBatchClient):
     """A 202 submit body carries `ingest_status: pending`; the flag
-    polls GET /jobs/{id} until it leaves `pending`."""
+    polls the submitted run until it leaves `pending`, then reads the job."""
     respx.post(f"{BASE_URL}/jobs").mock(
         return_value=Response(
             202,
@@ -702,12 +702,16 @@ def test_submit_wait_for_ingest_polls_202_until_done(client: ZenRowsBatchClient)
             },
         )
     )
+    run_route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_ingest_run_json("done"))
+    )
     get_route = respx.get(f"{BASE_URL}/jobs/J").mock(
         return_value=Response(200, json=_ingest_job_json("done"))
     )
 
     job = client.submit_regular(["https://example.com/a"], wait_for_ingest=True)
 
+    assert run_route.call_count == 1
     assert get_route.call_count == 1
     assert job.data.latest_run.ingest_status is IngestStatus.DONE
 
@@ -1178,3 +1182,462 @@ def test_submit_job_post_task_method_body_on_wire(client: ZenRowsBatchClient):
     assert sent["tasks"][0]["body"] == {"query": "{ products { id } }"}
     assert "method" not in sent["tasks"][1]
     assert "body" not in sent["tasks"][1]
+
+
+# ===== expired results, add-tasks idempotency, account limits =====
+
+
+def _results_page(rows: list[dict]) -> dict:
+    base = {
+        "run_id": "R",
+        "url": "https://example.com",
+        "created_at": "2026-08-25T12:00:00Z",
+        "updated_at": "2026-08-25T12:00:05Z",
+    }
+    return {"results": [{**base, **r} for r in rows]}
+
+
+def test_task_status_expired_and_run_trigger_parse():
+    """`expired` is a known TaskStatus and `Run.trigger` is typed."""
+    from zenrows.batch import Run, TaskStatus
+    from zenrows.batch.models import RunTrigger
+
+    row = _task_result("T1", status="expired")
+    assert row.status is TaskStatus.EXPIRED
+    assert row.result_url is None
+    assert row.spend is None  # result rows carry no per-task spend
+
+    run = Run.model_validate(
+        {
+            "run_id": "R",
+            "job_id": "J",
+            "run_sequence": 2,
+            "status": "completed",
+            "trigger": "scheduled",
+            "stats": {"total": 1, "completed": 1, "successful": 1, "failed": 0},
+            "created_at": "2026-08-25T12:00:00Z",
+            "updated_at": "2026-08-25T12:00:05Z",
+        }
+    )
+    assert run.trigger is RunTrigger.SCHEDULED
+
+
+@respx.mock
+def test_download_to_dir_skips_expired_and_failed_rows(
+    client: ZenRowsBatchClient, tmp_path, caplog
+):
+    """Rows with no body (expired, failed) are skipped and reported, not
+    fatal; the rest download."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(
+            200,
+            json=_results_page(
+                [
+                    {
+                        "task_id": "T1",
+                        "status": "successful",
+                        "type": "html",
+                        "result_url": "https://storage.example.test/T1",
+                    },
+                    {"task_id": "T2", "status": "expired", "type": "html"},
+                    {"task_id": "T3", "status": "failed"},
+                    {"task_id": "T4", "status": "expired"},
+                ]
+            ),
+        )
+    )
+    respx.get("https://storage.example.test/T1").mock(return_value=Response(200, content=b"ok"))
+
+    skipped: list[TaskResult] = []
+    with caplog.at_level("WARNING", logger="zenrows.batch.download"):
+        n = client.run("J", "R").download_to_dir(tmp_path, status=None, on_skip=skipped.append)
+
+    assert n == 1
+    assert (tmp_path / "T1.html").read_bytes() == b"ok"
+    assert [r.task_id for r in skipped] == ["T2", "T3", "T4"]
+    assert "skipped 3 result(s)" in caplog.text
+    assert "2 expired" in caplog.text and "1 failed" in caplog.text
+
+
+@respx.mock
+def test_download_to_memory_skips_expired_rows_concurrently(client: ZenRowsBatchClient):
+    """The parallel path skips the same rows, and they don't count toward
+    `max_count`."""
+    rows = [
+        {
+            "task_id": f"T{i}",
+            "status": "successful",
+            "result_url": f"https://storage.example.test/T{i}",
+        }
+        for i in range(3)
+    ] + [{"task_id": f"E{i}", "status": "expired"} for i in range(5)]
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(200, json=_results_page(rows))
+    )
+    respx.get(url__startswith="https://storage.example.test/").mock(
+        return_value=Response(200, content=b"x")
+    )
+
+    skipped: list[TaskResult] = []
+    out = client.run("J", "R").download_to_memory(
+        concurrency=4, max_count=3, on_skip=skipped.append
+    )
+
+    assert sorted(r.task_id for r in out) == ["T0", "T1", "T2"]
+    assert len(skipped) == 5
+
+
+@respx.mock
+def test_download_successful_row_without_url_still_raises(client: ZenRowsBatchClient, tmp_path):
+    """A `successful` row with no `result_url` is not a row without a
+    body, so it is not skipped silently."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R/results").mock(
+        return_value=Response(200, json=_results_page([{"task_id": "T1", "status": "successful"}]))
+    )
+    with pytest.raises(ValueError, match="no result_url"):
+        client.run("J", "R").download_to_dir(tmp_path)
+
+
+def test_download_task_expired_raises_clear_error(client: ZenRowsBatchClient):
+    task = _task_result("T1", status="expired")
+    with pytest.raises(ValueError, match="has expired"):
+        client.run("J", "R").download_task_to_memory(task)
+
+
+def _add_tasks_ok() -> Response:
+    return Response(
+        200, json={"accepted_tasks": 1, "job_status": "open", "latest_run": _run_json()}
+    )
+
+
+@respx.mock
+def test_add_tasks_sends_idempotency_key_and_retries_transient(
+    client: ZenRowsBatchClient, no_sleep
+):
+    """With a key, add-tasks sends `Idempotency-Key` and a 503 is retried
+    with the same key."""
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(
+        side_effect=[Response(503, json={}), _add_tasks_ok()]
+    )
+
+    resp = client.job("J").add_tasks(
+        {"tasks": [{"url": "https://example.com/a"}]}, idempotency_key="add-1"
+    )
+
+    assert resp.accepted_tasks == 1
+    assert route.call_count == 2
+    assert [c.request.headers["Idempotency-Key"] for c in route.calls] == ["add-1", "add-1"]
+
+
+@respx.mock
+def test_add_tasks_without_key_is_sent_once(client: ZenRowsBatchClient, no_sleep):
+    route = respx.post(f"{BASE_URL}/jobs/J/tasks").mock(return_value=Response(503, json={}))
+
+    with pytest.raises(BatchAPIError):
+        client.job("J").add_tasks({"tasks": [{"url": "https://example.com/a"}]})
+
+    assert route.call_count == 1
+    assert "Idempotency-Key" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_quota_exceeded_429_is_not_retried(client: ZenRowsBatchClient, no_sleep):
+    """A 429 `quota_exceeded` is an account limit: raised at once, with
+    the named code."""
+    from zenrows.batch import BatchErrorCode
+
+    route = respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            429,
+            json={
+                "type": "https://docs.zenrows.com/api-error-codes#quota_exceeded",
+                "title": "Quota exceeded",
+                "status": 429,
+                "code": "quota_exceeded",
+            },
+        )
+    )
+
+    with pytest.raises(BatchAPIError) as exc:
+        client.submit_regular(["https://a"], idempotency_key="k1")
+
+    assert route.call_count == 1
+    assert no_sleep == []
+    assert exc.value.code == BatchErrorCode.QUOTA_EXCEEDED
+
+
+@respx.mock
+def test_plain_429_is_still_retried(client: ZenRowsBatchClient, no_sleep):
+    route = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[Response(429, json={}), Response(200, json=_ingest_job_json("done"))]
+    )
+    client.get_job("J")
+    assert route.call_count == 2
+
+
+def test_batch_error_code_names_every_api_code():
+    """`BatchErrorCode` covers every code the Batch API sends, and its
+    members compare equal to the plain-string `BatchAPIError.code`."""
+    from zenrows.batch import BatchErrorCode
+
+    expected = {
+        "invalid_argument", "not_found", "conflict", "unauthenticated",
+        "payment_required", "permission_denied", "quota_exceeded",
+        "subscription_inactive", "api_key_cap_reached", "internal",
+        "job_not_open", "run_not_terminal", "run_not_stoppable", "no_prior_run",
+        "no_matching_tasks", "run_has_descendants", "last_batch_received",
+        "idempotency_key_conflict", "task_not_ready", "not_implemented",
+        "result_expired", "partial_rerun_window_expired", "candidate_pending",
+        "no_candidate", "unsupported_scheme", "malformed_url", "missing_host",
+        "url_too_long", "metadata_too_large", "metadata_key_invalid",
+        "invalid_external_id", "unsupported_method", "body_not_allowed",
+        "body_too_large", "body_malformed", "method_param_conflict",
+        "file_input_not_found", "file_input_not_uploaded",
+        "file_input_unsupported_for_job_type", "callback_url_must_be_https",
+        "callback_url_unresolvable", "webhook_signing_requires_active_key",
+        "gateway_unreachable",
+    }  # fmt: skip
+    assert {c.value for c in BatchErrorCode} == expected
+    assert BatchErrorCode.RESULT_EXPIRED == "result_expired"
+    err = BatchAPIError(410, None, b"")
+    err.code = "result_expired"
+    assert err.code == BatchErrorCode.RESULT_EXPIRED
+
+
+# ===== waiters on a paused run =====
+
+
+@pytest.fixture
+def no_poll_sleep(monkeypatch):
+    slept: list[float] = []
+    monkeypatch.setattr("zenrows.batch._waiters.time.sleep", slept.append)
+    return slept
+
+
+@respx.mock
+def test_wait_raises_run_paused_instead_of_spinning(client: ZenRowsBatchClient, no_poll_sleep):
+    """A paused run never progresses: the waiter raises `RunPaused` on the
+    first poll that sees it, carrying the run."""
+    from zenrows.batch import RunPaused, WaiterError
+
+    route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_run_json(pause_state="paused"))
+    )
+
+    with pytest.raises(RunPaused) as exc:
+        client.run("J", "R").wait(timeout=600)
+
+    assert isinstance(exc.value, WaiterError)
+    assert exc.value.run.run_id == "R"
+    assert route.call_count == 1
+    assert no_poll_sleep == []
+
+
+@respx.mock
+def test_current_run_wait_raises_run_paused(client: ZenRowsBatchClient, no_poll_sleep):
+    from zenrows.batch import RunPaused
+
+    job = _ingest_job_json("done")
+    job["latest_run"] = _run_json(pause_state="paused")
+    respx.get(f"{BASE_URL}/jobs/J").mock(return_value=Response(200, json=job))
+
+    with pytest.raises(RunPaused):
+        client.job("J").run.wait()
+
+
+@respx.mock
+def test_wait_returns_a_paused_run_that_is_already_terminal(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """A run stopped while paused is terminal: it is returned, not raised."""
+    respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        return_value=Response(200, json=_run_json(status="stopped", pause_state="paused"))
+    )
+    run = client.run("J", "R").wait()
+    assert run.data.status.value == "stopped"
+
+
+@respx.mock
+def test_wait_while_paused_keeps_polling(client: ZenRowsBatchClient, no_poll_sleep):
+    route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_run_json(pause_state="paused")),
+            Response(200, json=_run_json(pause_state="active")),
+            Response(200, json=_run_json(status="completed")),
+        ]
+    )
+
+    run = client.wait_for_run("J", run_id="R", wait_while_paused=True)
+
+    assert run.status.value == "completed"
+    assert route.call_count == 3
+
+
+# ===== wait_for_ingest on rerun / retry_failed / submit_scheduled =====
+
+
+def _ingesting_rerun(ingest_status: str) -> dict:
+    body = _rerun_response("R2", total=100, successful=0)
+    body["latest_run"]["ingest_status"] = ingest_status
+    return body
+
+
+def _run_with_ingest(ingest_status: str, *, run_id: str = "R2", status: str = "running") -> dict:
+    return {**_run_json(run_id=run_id, status=status), "ingest_status": ingest_status}
+
+
+@respx.mock
+@pytest.mark.parametrize("call", ["rerun", "retry_failed"])
+def test_rerun_wait_for_ingest_polls_the_returned_run_until_done(
+    client: ZenRowsBatchClient, no_poll_sleep, call: str
+):
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    poll = respx.get(f"{BASE_URL}/jobs/J/runs/R2").mock(
+        side_effect=[
+            Response(200, json=_run_with_ingest("pending")),
+            Response(200, json=_run_with_ingest("done")),
+        ]
+    )
+
+    run = getattr(client.job("J"), call)(wait_for_ingest=True)
+
+    assert poll.call_count == 2
+    assert run.run_id == "R2"
+    assert run.data.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_rerun_wait_for_ingest_follows_a_replayed_older_run(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """An idempotent replay can answer with an older run (R2) while a
+    newer run (R3) is the job's latest: the wait follows R2, not the job."""
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    job_poll = respx.get(f"{BASE_URL}/jobs/J").mock(
+        return_value=Response(200, json={**_ingest_job_json("pending")})
+    )
+    run_poll = respx.get(f"{BASE_URL}/jobs/J/runs/R2").mock(
+        return_value=Response(200, json=_run_with_ingest("done", status="completed"))
+    )
+
+    run = client.job("J").rerun(idempotency_key="k1", wait_for_ingest=True)
+
+    assert job_poll.call_count == 0
+    assert run_poll.call_count == 1
+    assert run.data.status.value == "completed"
+    assert run.data.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_rerun_wait_for_ingest_does_not_stop_at_a_stopped_run(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """A run stopped mid-ingest stays `ingest_status: pending` until the
+    ingest worker winds down: the wait keeps polling until it is done."""
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    poll = respx.get(f"{BASE_URL}/jobs/J/runs/R2").mock(
+        side_effect=[
+            Response(200, json=_run_with_ingest("pending", status="stopped")),
+            Response(200, json=_run_with_ingest("done", status="stopped")),
+        ]
+    )
+
+    run = client.job("J").rerun(wait_for_ingest=True)
+
+    assert poll.call_count == 2
+    assert run.data.status.value == "stopped"
+    assert run.data.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_rerun_without_wait_for_ingest_returns_at_once(client: ZenRowsBatchClient):
+    respx.post(f"{BASE_URL}/jobs/J/rerun").mock(
+        return_value=Response(202, json=_ingesting_rerun("pending"))
+    )
+    poll = respx.get(url__startswith=f"{BASE_URL}/jobs/J")
+
+    run = client.job("J").rerun()
+
+    assert poll.call_count == 0
+    assert run.data.ingest_status is IngestStatus.PENDING
+
+
+@respx.mock
+def test_submit_scheduled_returns_after_one_request(client: ZenRowsBatchClient, no_poll_sleep):
+    """Creating a scheduled job answers 201 with no run (the first fire
+    creates it), so there is nothing to poll and no wait option."""
+    from zenrows.batch import Rate
+
+    respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(201, json={"job_id": "J", "status": "closed", "accepted_tasks": 1})
+    )
+    poll = respx.get(url__startswith=f"{BASE_URL}/jobs/J")
+
+    ref = client.submit_scheduled(Rate(every=6, unit="hour"), ["https://example.com"])
+
+    assert poll.call_count == 0
+    assert ref.job_id == "J"
+    assert ref.submit_response.latest_run is None
+
+
+# ===== job-level wait_for_ingest =====
+
+
+@respx.mock
+def test_job_wait_for_ingest_does_not_stop_at_a_stopped_run(
+    client: ZenRowsBatchClient, no_poll_sleep
+):
+    """A run stopped mid-ingest is terminal but still `pending`: the
+    job-level wait keeps polling until ingestion is done."""
+    stopped_pending = _ingest_job_json("pending")
+    stopped_pending["latest_run"]["status"] = "stopped"
+    stopped_done = _ingest_job_json("done")
+    stopped_done["latest_run"]["status"] = "stopped"
+    route = respx.get(f"{BASE_URL}/jobs/J").mock(
+        side_effect=[Response(200, json=stopped_pending), Response(200, json=stopped_done)]
+    )
+
+    out = client.job("J").wait_for_ingest()
+
+    assert route.call_count == 2
+    assert out.data.latest_run.ingest_status is IngestStatus.DONE
+
+
+@respx.mock
+def test_submit_wait_for_ingest_polls_the_submitted_run(client: ZenRowsBatchClient, no_poll_sleep):
+    """A replayed submit can name an older run while a newer one is the
+    job's latest: the wait polls the submitted run by id."""
+    respx.post(f"{BASE_URL}/jobs").mock(
+        return_value=Response(
+            202,
+            json={
+                "job_id": "J",
+                "status": "closed",
+                "accepted_tasks": 10000,
+                "latest_run": _ingest_run_json("pending"),
+            },
+        )
+    )
+    run_route = respx.get(f"{BASE_URL}/jobs/J/runs/R").mock(
+        side_effect=[
+            Response(200, json=_ingest_run_json("pending", status="stopped")),
+            Response(200, json=_ingest_run_json("done", status="stopped")),
+        ]
+    )
+    newer = _ingest_job_json("pending")
+    newer["latest_run"]["run_id"] = "R3"
+    job_route = respx.get(f"{BASE_URL}/jobs/J").mock(return_value=Response(200, json=newer))
+
+    handle = client.submit_regular(
+        ["https://example.com/a"], idempotency_key="k1", wait_for_ingest=True
+    )
+
+    assert run_route.call_count == 2
+    assert job_route.call_count == 1  # one read for the handle's data, not a poll
+    assert handle.submit_response.latest_run.run_id == "R"
