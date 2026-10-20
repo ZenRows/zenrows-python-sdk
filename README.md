@@ -143,7 +143,7 @@ response = client.post(url, data={
 print(response.text)
 ```
 
-A POST is sent once, even when it fails with a status the client would retry for a GET. To let the client retry it, pass an `Idempotency-Key` header and a body it can send again; see [Retries](#retries).
+The client never retries a POST. It sends it once, even when it fails with a status the client would retry for a GET. If you need to retry a POST, write that retry yourself; see [Retries](#retries).
 
 ### PUT Requests
 
@@ -163,7 +163,7 @@ response = client.put(url, data={
 print(response.text)
 ```
 
-A PUT follows the same rule as a POST: it is retried only with an `Idempotency-Key` header and a body the client can send again.
+The client never retries a PUT either. It sends it once.
 
 ### Concurrency
 
@@ -286,9 +286,10 @@ It never retries these:
 
 Which requests it retries:
 
-1. A GET is always eligible.
-2. A POST or PUT is eligible only when it carries an `Idempotency-Key` header and a body the client can send again: a string, bytes, a dict, or a file object that can seek. A generator, an iterator or another one-shot stream is never retried, because a second try would send it empty. Note that `headers` are forwarded to the target site, so the key reaches the target too.
-3. Any other request is sent once.
+1. A GET is eligible when its body is empty, a string, bytes, or a dict the client encodes.
+2. A request with a file object, a generator, an iterator or another stream as its body is never retried. The first try reads it, so a second try would send it empty.
+3. A POST or PUT is never retried. The client sends it once, whatever its headers, its body or the failure. If you need to retry one, write that retry yourself.
+4. The API does not deduplicate a request by its `Idempotency-Key` header, so the client does not retry on that header.
 
 How long it waits between tries:
 
@@ -306,11 +307,7 @@ from zenrows import ZenRowsClient
 
 client = ZenRowsClient("YOUR-API-KEY", retries=3, retry_max_wait=10, retry_budget=60)
 
-response = client.post(
-    "https://httpbin.org/anything",
-    headers={"Idempotency-Key": "a-unique-key-per-order"},
-    data={"key1": "value1"},
-)
+response = client.fetch("https://www.zenrows.com/")
 ```
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)

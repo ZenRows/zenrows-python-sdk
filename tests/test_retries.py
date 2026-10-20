@@ -2,11 +2,12 @@
 
 Retried: 429, 500, 502, 503, 504, a 422 other than `no_data_extracted`, and a
 failure to connect. Never retried: any other status, a read timeout, or a
-connection that drops after the request was sent. A GET is always eligible; a
-POST or PUT only with an `Idempotency-Key` header and a body that can be sent
-again. Waits honour a whole-seconds `Retry-After` (clamped to [0.25, 30]) or
-else use full jitter, and no retry starts past `retry_budget`. Sleeps are
-patched out; the budget runs on a fake clock.
+connection that drops after the request was sent. Only a GET, HEAD or OPTIONS
+whose body is none, a string or bytes is retried; a POST or PUT is sent once,
+with or without an `Idempotency-Key` header. Waits honour a whole-seconds
+`Retry-After` (clamped to [0.25, 30]) or else use full jitter, and no retry
+starts past `retry_budget`. Sleeps are patched out; the budget runs on a fake
+clock.
 """
 
 import asyncio
@@ -339,13 +340,15 @@ def test_connection_dropped_after_send_is_not_retried_for_get(
     assert sleeps == []
 
 
-def test_connection_dropped_after_send_is_not_retried_for_post(
-    server: _Server, sleeps: list[float]
+@pytest.mark.parametrize("headers", [None, KEY])
+@pytest.mark.parametrize("verb", ["post", "put"])
+def test_connection_dropped_after_send_is_not_retried_for_post_and_put(
+    server: _Server, sleeps: list[float], verb: str, headers: dict[str, str] | None
 ) -> None:
     server.script = [DROP, (200, {}, b"ok")]
 
     with pytest.raises(requests.exceptions.ConnectionError):
-        client(server, retries=3).post(TARGET, headers=KEY, data="payload")
+        getattr(client(server, retries=3), verb)(TARGET, headers=headers, data="payload")
 
     assert server.calls == 1
     assert sleeps == []
@@ -362,83 +365,101 @@ def test_connection_refused_is_retried(sleeps: list[float]) -> None:
 # ---- which requests may be sent again ----
 
 
+@pytest.mark.parametrize("status", [503, 429, 422, 500])
+@pytest.mark.parametrize("headers", [None, KEY, {"idempotency-key": "k"}])
 @pytest.mark.parametrize("verb", ["post", "put"])
-def test_post_and_put_without_idempotency_key_are_sent_once(
-    server: _Server, sleeps: list[float], verb: str
+def test_post_and_put_are_sent_once(
+    server: _Server,
+    sleeps: list[float],
+    verb: str,
+    headers: dict[str, str] | None,
+    status: int,
 ) -> None:
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = getattr(client(server, retries=3), verb)(TARGET, headers=headers, data="payload")
+
+    # An `Idempotency-Key` changes nothing: the API does not deduplicate on it.
+    assert response.status_code == status
+    assert server.bodies == [b"payload"]
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("headers", [None, KEY])
+@pytest.mark.parametrize("verb", ["post", "put"])
+def test_post_and_put_are_sent_once_after_a_failure_to_connect(
+    sleeps: list[float], verb: str, headers: dict[str, str] | None
+) -> None:
+    zr = ZenRowsClient(APIKEY, retries=3, base_url=f"http://127.0.0.1:{_closed_port()}/")
+    with pytest.raises(requests.exceptions.ConnectionError):
+        getattr(zr, verb)(TARGET, headers=headers, data="payload")
+
+    # A GET to the same closed port waits before each of its retries.
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("verb", ["post_async", "put_async"])
+def test_post_and_put_async_are_sent_once(server: _Server, sleeps: list[float], verb: str) -> None:
     server.script = [(503, {}, b""), (200, {}, b"ok")]
 
-    response = getattr(client(server), verb)(TARGET, data="payload")
+    response = asyncio.run(getattr(client(server), verb)(TARGET, headers=KEY, data="payload"))
 
     assert response.status_code == 503
     assert server.calls == 1
     assert sleeps == []
 
 
-def test_post_without_idempotency_key_does_not_retry_a_422(
-    server: _Server, sleeps: list[float]
+@pytest.mark.parametrize("status", [422, 503])
+def test_post_with_a_file_body_is_sent_once(
+    server: _Server, sleeps: list[float], status: int
 ) -> None:
-    server.script = [(422, {}, NO_CONTENT), (200, {}, b"ok")]
+    # A 422 retry used to send this body again empty, after the first try had
+    # read the file to its end.
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
 
-    response = client(server).post(TARGET, data="payload")
+    response = client(server).post(TARGET, headers=KEY, data=io.BytesIO(b"payload=1"))
 
-    assert response.status_code == 422
-    assert server.calls == 1
-
-
-def test_post_without_idempotency_key_does_not_retry_a_failure_to_connect(
-    sleeps: list[float],
-) -> None:
-    zr = ZenRowsClient(APIKEY, base_url=f"http://127.0.0.1:{_closed_port()}/")
-    with pytest.raises(requests.exceptions.ConnectionError):
-        zr.post(TARGET, data="payload")
-
+    assert response.status_code == status
+    assert response.content == NO_CONTENT
+    assert server.bodies == [b"payload=1"]
     assert sleeps == []
 
 
-@pytest.mark.parametrize(
-    ("verb", "data", "sent"),
-    [
-        ("post", "payload", b"payload"),
-        ("post", b"payload", b"payload"),
-        ("put", {"a": "1"}, b"a=1"),
-        ("post", io.BytesIO(b"payload"), b"payload"),
-    ],
-)
-def test_idempotency_key_and_a_body_that_can_be_sent_again_are_retried(
-    server: _Server, sleeps: list[float], verb: str, data: object, sent: bytes
-) -> None:
-    server.script = [(503, {}, b""), (200, {}, b"ok")]
-
-    response = getattr(client(server), verb)(TARGET, headers=KEY, data=data)
-
-    assert response.status_code == 200
-    assert server.bodies == [sent, sent]
-
-
-def test_idempotency_key_matches_any_case(server: _Server, sleeps: list[float]) -> None:
-    server.script = [(422, {}, NO_CONTENT), (200, {}, b"ok")]
-
-    response = client(server).post(TARGET, headers={"idempotency-key": "k"}, data="payload")
-
-    assert response.status_code == 200
-    assert server.calls == 2
-
-
 @pytest.mark.parametrize("status", [503, 422])
-@pytest.mark.parametrize("kind", ["generator", "iterator"])
-def test_a_body_that_cannot_be_sent_again_is_never_retried(
-    server: _Server, sleeps: list[float], status: int, kind: str
+@pytest.mark.parametrize("kind", ["file", "generator", "iterator"])
+def test_get_with_a_one_shot_body_is_not_retried(
+    server: _Server, sleeps: list[float], kind: str, status: int
 ) -> None:
     server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
     chunks = [b"chunk1-", b"chunk2"]
-    data = (c for c in chunks) if kind == "generator" else iter(chunks)
+    data = {
+        "file": lambda: io.BytesIO(b"".join(chunks)),
+        "generator": lambda: (c for c in chunks),
+        "iterator": lambda: iter(chunks),
+    }[kind]()
 
-    response = client(server).post(TARGET, headers=KEY, data=data)
+    response = client(server).fetch(TARGET, data=data)
 
     assert response.status_code == status
     assert server.bodies == [b"chunk1-chunk2"]
     assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [503, 422])
+@pytest.mark.parametrize(
+    ("data", "sent"),
+    [("payload", b"payload"), (b"payload", b"payload"), ({"a": "1"}, b"a=1")],
+)
+def test_get_with_a_string_or_bytes_body_is_retried(
+    server: _Server, sleeps: list[float], data: object, sent: bytes, status: int
+) -> None:
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET, data=data)
+
+    assert response.status_code == 200
+    assert server.bodies == [sent, sent]
+    assert len(sleeps) == 1
 
 
 # ---- how long it waits ----

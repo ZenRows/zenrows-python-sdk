@@ -19,7 +19,7 @@ import random
 import re
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -57,8 +57,9 @@ _RETRY_AFTER_CAP = 30.0
 # a sign or anything else falls back to the jittered wait.
 _RETRY_AFTER_SECONDS = re.compile(r"[0-9]+")
 
-# Methods that are safe to send again. Any other method is retried only
-# with an `Idempotency-Key` header.
+# The only methods the client retries. Any other method is sent once: the API
+# does not deduplicate a request by `Idempotency-Key`, so a second POST or PUT
+# could run twice.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Clock for the retry budget; tests replace it.
@@ -110,19 +111,29 @@ def _check_retry_options(retries: Any, retry_max_wait: Any, retry_budget: Any) -
             )
 
 
+def _method_can_be_sent_again(method: str | None) -> bool:
+    """True for GET, HEAD and OPTIONS, the only methods the client retries."""
+    return (method or "").upper() in _SAFE_METHODS
+
+
+def _body_can_be_sent_again(body: Any) -> bool:
+    """True when a request body is none, a string or bytes. A file object, a
+    generator, an iterator or a stream is read by the first try, so it is
+    never sent again."""
+    return body is None or isinstance(body, (bytes, str))
+
+
+def _data_can_be_sent_again(data: Any) -> bool:
+    """True when `requests` builds the same body from `data` every time:
+    none, a string, bytes, or a dict or list it encodes. A file object, a
+    generator or an iterator is read by the first try."""
+    return data is None or isinstance(data, (bytes, str, Mapping, list, tuple))
+
+
 def _can_send_again(request: requests.PreparedRequest) -> bool:
-    """True when sending `request` again is safe: a GET, HEAD or OPTIONS, or
-    any other method with an `Idempotency-Key` header; and in both cases a
-    body that can be sent again. A generator, an iterator or a stream that
-    cannot seek is read once, so a second try would send it empty."""
-    method = (request.method or "").upper()
-    if method not in _SAFE_METHODS and "Idempotency-Key" not in request.headers:
-        return False
-    body = request.body
-    if body is None or isinstance(body, (bytes, str)):
-        return True
-    seekable = getattr(body, "seekable", None)
-    return callable(seekable) and bool(seekable()) and hasattr(body, "tell")
+    """True when urllib3 may send `request` again: a GET, HEAD or OPTIONS
+    whose body is none, a string or bytes."""
+    return _method_can_be_sent_again(request.method) and _body_can_be_sent_again(request.body)
 
 
 @dataclass
@@ -132,7 +143,7 @@ class _CallState:
 
     started: float
     retries_used: int = 0
-    # Whether the request being sent may be sent again; set per request.
+    # Whether urllib3 may send the current request again; set per request.
     can_send_again: bool = True
 
 
@@ -168,10 +179,10 @@ class _RetryPolicy:
 
     def next_delay(self, state: _CallState, retry_after: str | None) -> float | None:
         """The wait before the call's next retry, or None when no retry may
-        start: the request cannot be sent again, the retries are used up, or
-        the wait would end past the budget. Counts the retry when it allows
-        one."""
-        if not state.can_send_again or state.retries_used >= self.retries:
+        start: the retries are used up, or the wait would end past the
+        budget. Counts the retry when it allows one. The caller first checks
+        that the request may be sent again."""
+        if state.retries_used >= self.retries:
             return None
         delay = _retry_delay(retry_after, state.retries_used, self.retry_max_wait)
         if _monotonic() - state.started + delay > self.retry_budget:
@@ -228,7 +239,8 @@ class _JitteredRetry(Retry):
     ) -> "_JitteredRetry":
         retry = super().increment(method, url, response, error, _pool, _stacktrace)
         retry_after = response.headers.get("Retry-After") if response is not None else None
-        delay = retry.policy.next_delay(retry._current_state(), retry_after)
+        state = retry._current_state()
+        delay = retry.policy.next_delay(state, retry_after) if state.can_send_again else None
         if delay is None:
             reason = error or ResponseError("no retry left for this call")
             raise MaxRetryError(_pool, url, reason) from reason
@@ -406,8 +418,10 @@ class ZenRowsClient:
     `retries` (default 2) retries a 429, 500, 502, 503 or 504, a 422 other
     than Extract's `no_data_extracted`, and a failure to connect. It never
     retries any other status, a read timeout, or a connection that fails
-    after the request was sent. A GET is always eligible; a POST or PUT only
-    with an `Idempotency-Key` header and a body that can be sent again.
+    after the request was sent. It retries only a GET, HEAD or OPTIONS whose
+    body is none, a string, bytes, or a dict it encodes. A POST or PUT is
+    always sent once: the API does not deduplicate a request by
+    `Idempotency-Key`, so the client does not retry on it.
 
     Between tries it waits the server's `Retry-After` when that is whole
     seconds (at least 0.25, at most 30), or else a random 0.25 to
@@ -773,11 +787,14 @@ class ZenRowsClient:
             return send()
         with _call_scope() as state:
             response = send()
+            # This loop builds the request again from `data`, so it retries
+            # only a method it may send again with a body built the same way.
+            if not (_method_can_be_sent_again(method) and _data_can_be_sent_again(data)):
+                return response
             # Retry a 422 here rather than in urllib3, which can't read the
             # body: Extract's `no_data_extracted` is a final answer, any other
             # 422 is a failure to get the target's content and is worth
             # another try. Same count, wait and budget as urllib3's retries.
-            # The adapter already set `state.can_send_again` for this request.
             while response.status_code == 422 and not is_no_data_extracted(response):
                 delay = policy.next_delay(state, response.headers.get("Retry-After"))
                 if delay is None:
