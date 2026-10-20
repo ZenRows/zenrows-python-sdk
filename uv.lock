@@ -978,6 +978,7 @@ dependencies = [
     { name = "requests" },
     { name = "tqdm" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -999,6 +1000,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31" },
     { name = "tqdm", specifier = ">=4.66" },
     { name = "typing-extensions", marker = "python_full_version < '3.11'", specifier = ">=4.0" },
+    { name = "urllib3", specifier = ">=1.26" },
 ]
 
 [package.metadata.requires-dev]
