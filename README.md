@@ -283,6 +283,7 @@ It never retries these:
 1. Any other status, such as `400`, `401`, `402`, `403` or `404`.
 2. A read timeout, or a connection that closes after the request was sent. The server may still be working on that request, and may charge it.
 3. A call to `prepare_domain()` or `prepared_domain_status()`. Their `429` and `503` are answers to read, so these calls are sent once; see [Preparing a domain](#preparing-a-domain).
+4. Any status when `params` sets `original_status`, and any status listed in `allowed_status_codes`. That status comes from the target site, so another try cannot change it. A failure to connect is still retried.
 
 Which requests it retries:
 

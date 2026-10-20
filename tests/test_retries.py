@@ -4,7 +4,9 @@ Retried: 429, 500, 502, 503, 504, a 422 other than `no_data_extracted`, and a
 failure to connect. Never retried: any other status, a read timeout, or a
 connection that drops after the request was sent. Only a GET, HEAD or OPTIONS
 whose body is none, a string or bytes is retried; a POST or PUT is sent once,
-with or without an `Idempotency-Key` header. Waits honour a whole-seconds
+with or without an `Idempotency-Key` header. A status from the target site
+(any status with `original_status`, or one listed in `allowed_status_codes`)
+is never retried. Waits honour a whole-seconds
 `Retry-After` (clamped to [0.25, 30]) or else use full jitter, and no retry
 starts past `retry_budget`. Sleeps are patched out; the budget runs on a fake
 clock.
@@ -482,6 +484,116 @@ def test_get_with_a_string_or_bytes_body_is_retried(
     assert response.status_code == 200
     assert server.bodies == [sent, sent]
     assert len(sleeps) == 1
+
+
+# ---- statuses from the target site ----
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 422])
+@pytest.mark.parametrize("value", [True, "true", "TRUE", 1, "1"])
+def test_original_status_turns_off_every_status_retry(
+    server: _Server, sleeps: list[float], value: object, status: int
+) -> None:
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server, retries=3).fetch(TARGET, params={"original_status": value})
+
+    # The API passes the target's own status through, and the client
+    # cannot tell it from a status the API sent itself.
+    assert response.status_code == status
+    assert server.calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [503, 422])
+@pytest.mark.parametrize(
+    "params",
+    [
+        None,
+        {"original_status": False},
+        {"original_status": "false"},
+        {"original_status": 0},
+        {"original_status": "0"},
+        {"original_status": ""},
+    ],
+)
+def test_original_status_false_or_absent_still_retries(
+    server: _Server, sleeps: list[float], params: dict | None, status: int
+) -> None:
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET, params=params)
+
+    assert response.status_code == 200
+    assert server.calls == 2
+    assert len(sleeps) == 1
+
+
+@pytest.mark.parametrize("allowed", ["503", "404,503", " 404 , 503 ", ["404", "503"], [404, 503]])
+def test_allowed_status_code_is_not_retried(
+    server: _Server, sleeps: list[float], allowed: object
+) -> None:
+    server.script = [(503, {}, b""), (200, {}, b"ok")]
+
+    response = client(server, retries=3).fetch(TARGET, params={"allowed_status_codes": allowed})
+
+    assert response.status_code == 503
+    assert server.calls == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("status", [502, 422])
+def test_status_not_in_allowed_status_codes_is_still_retried(
+    server: _Server, sleeps: list[float], status: int
+) -> None:
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET, params={"allowed_status_codes": "404,503"})
+
+    assert response.status_code == 200
+    assert server.calls == 2
+    assert len(sleeps) == 1
+
+
+def test_422_in_allowed_status_codes_is_not_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(422, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server, retries=3).fetch(TARGET, params={"allowed_status_codes": "404,422"})
+
+    assert response.status_code == 422
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_extract_with_original_status_is_not_retried(server: _Server, sleeps: list[float]) -> None:
+    server.script = [(422, {}, NO_CONTENT), (503, {}, b""), (200, {}, b"ok")]
+
+    response = client(server).extract(TARGET, params={"original_status": "true"})
+
+    assert response.status_code == 422
+    assert server.calls == 1
+    assert sleeps == []
+
+
+def test_original_status_applies_to_its_own_call_only(server: _Server, sleeps: list[float]) -> None:
+    zr = client(server)
+    server.script = [(503, {}, b""), (503, {}, b""), (200, {}, b"ok")]
+
+    first = zr.fetch(TARGET, params={"original_status": "true"})
+    second = zr.fetch(TARGET)
+
+    assert (first.status_code, second.status_code) == (503, 200)
+    assert server.calls == 3
+    assert len(sleeps) == 1
+
+
+def test_failure_to_connect_with_original_status_is_still_retried(sleeps: list[float]) -> None:
+    zr = ZenRowsClient(APIKEY, base_url=f"http://127.0.0.1:{_closed_port()}/")
+    with pytest.raises(requests.exceptions.ConnectionError):
+        zr.fetch(TARGET, params={"original_status": "true", "allowed_status_codes": "503"})
+
+    # A refused connection is not a status: the request never reached the API.
+    assert len(sleeps) == 2
 
 
 # ---- how long it waits ----

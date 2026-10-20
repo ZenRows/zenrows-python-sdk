@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import requests
 import urllib3
@@ -136,6 +136,42 @@ def _can_send_again(request: requests.PreparedRequest) -> bool:
     return _method_can_be_sent_again(request.method) and _body_can_be_sent_again(request.body)
 
 
+# The `original_status` values the client reads as true, in any case. The
+# docs spell it "true"; requests sends a Python True as "True" and 1 as "1".
+_TRUE_VALUES = frozenset({"true", "1"})
+
+
+@dataclass(frozen=True)
+class _TargetStatuses:
+    """The statuses of one request that come from the target site, not from
+    the API. Another try cannot change them, so they are never retried.
+
+    With `original_status` set, the API answers with the target's own
+    status, so every status may be the target's. With
+    `allowed_status_codes`, the API passes the listed target statuses
+    through."""
+
+    every: bool = False
+    listed: frozenset[int] = frozenset()
+
+    def __contains__(self, status: object) -> bool:
+        return self.every or status in self.listed
+
+    @classmethod
+    def from_url(cls, url: str | None) -> "_TargetStatuses":
+        query = parse_qs(urlsplit(url or "").query, keep_blank_values=True)
+        every = any(v.strip().lower() in _TRUE_VALUES for v in query.get("original_status", []))
+        # A comma-separated list, or the key repeated (requests sends a
+        # list that way). A token that is not a status code is ignored.
+        listed = frozenset(
+            int(token)
+            for value in query.get("allowed_status_codes", [])
+            for token in (part.strip() for part in value.split(","))
+            if token.isdigit()
+        )
+        return cls(every, listed)
+
+
 @dataclass
 class _CallState:
     """The retry state of one call. urllib3's retries and the 422 retry in
@@ -145,6 +181,9 @@ class _CallState:
     retries_used: int = 0
     # Whether urllib3 may send the current request again; set per request.
     can_send_again: bool = True
+    # The current request's statuses that come from the target site, which
+    # neither urllib3 nor the 422 loop retries; set per request.
+    target_statuses: _TargetStatuses = _TargetStatuses()
 
 
 # The current call's retry state. A context variable, so concurrent calls on
@@ -240,7 +279,9 @@ class _JitteredRetry(Retry):
         retry = super().increment(method, url, response, error, _pool, _stacktrace)
         retry_after = response.headers.get("Retry-After") if response is not None else None
         state = retry._current_state()
-        delay = retry.policy.next_delay(state, retry_after) if state.can_send_again else None
+        from_target = response is not None and response.status in state.target_statuses
+        may_retry = state.can_send_again and not from_target
+        delay = retry.policy.next_delay(state, retry_after) if may_retry else None
         if delay is None:
             reason = error or ResponseError("no retry left for this call")
             raise MaxRetryError(_pool, url, reason) from reason
@@ -261,11 +302,13 @@ class _JitteredRetry(Retry):
 
 class _RetryBudgetAdapter(HTTPAdapter):
     """Gives each request the retry state of the call it belongs to, and
-    says whether that request may be sent again."""
+    says whether that request may be sent again and which of its statuses
+    come from the target site."""
 
     def send(self, request: Any, *args: Any, **kwargs: Any) -> requests.Response:
         with _call_scope() as state:
             state.can_send_again = _can_send_again(request)
+            state.target_statuses = _TargetStatuses.from_url(request.url)
             return super().send(request, *args, **kwargs)
 
 
@@ -421,7 +464,9 @@ class ZenRowsClient:
     after the request was sent. It retries only a GET, HEAD or OPTIONS whose
     body is none, a string, bytes, or a dict it encodes. A POST or PUT is
     always sent once: the API does not deduplicate a request by
-    `Idempotency-Key`, so the client does not retry on it.
+    `Idempotency-Key`, so the client does not retry on it. It retries no
+    status when `params` sets `original_status`, and no status listed in
+    `allowed_status_codes`: that status comes from the target site.
 
     Between tries it waits the server's `Retry-After` when that is whole
     seconds (at least 0.25, at most 30), or else a random 0.25 to
@@ -801,7 +846,13 @@ class ZenRowsClient:
             # body: Extract's `no_data_extracted` is a final answer, any other
             # 422 is a failure to get the target's content and is worth
             # another try. Same count, wait and budget as urllib3's retries.
-            while response.status_code == 422 and not is_no_data_extracted(response):
+            # A 422 from the target site (`original_status`, or listed in
+            # `allowed_status_codes`) is the target's answer: not retried.
+            while (
+                response.status_code == 422
+                and not is_no_data_extracted(response)
+                and 422 not in state.target_statuses
+            ):
                 delay = policy.next_delay(state, response.headers.get("Retry-After"))
                 if delay is None:
                     break
