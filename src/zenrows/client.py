@@ -74,7 +74,12 @@ def _retry_after_seconds(value: str | None) -> float | None:
     value = value.strip()
     if not _RETRY_AFTER_SECONDS.fullmatch(value):
         return None
-    return min(max(float(int(value)), _RETRY_MIN_WAIT), _RETRY_AFTER_CAP)
+    # Three or more significant digits is already past the cap. Return the cap
+    # without parsing: int() raises on a string of thousands of digits.
+    digits = value.lstrip("0")
+    if len(digits) > 2:
+        return _RETRY_AFTER_CAP
+    return min(max(float(int(digits or "0")), _RETRY_MIN_WAIT), _RETRY_AFTER_CAP)
 
 
 def _jitter(attempt: int, retry_max_wait: float) -> float:

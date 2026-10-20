@@ -294,7 +294,7 @@ Which requests it retries:
 
 How long it waits between tries:
 
-1. When the response has a `Retry-After` header in whole seconds, the client waits that long, at least 0.25 seconds and at most 30 seconds. The 30-second cap is fixed; `retry_max_wait` does not change it.
+1. When the response has a `Retry-After` header in whole seconds, the client waits that long, at least 0.25 seconds and at most 30 seconds. The 30-second cap is fixed; `retry_max_wait` does not change it. A value of any length works: any number above 30, however long, waits 30 seconds.
 2. Otherwise, or when `Retry-After` is an HTTP date, a fraction or any other value, it waits a random time between 0.25 seconds and `min(retry_max_wait, 2 ** attempt)` seconds, where `attempt` counts retries from 0. `retry_max_wait` defaults to 30 seconds. The wait is never shorter than 0.25 seconds.
 
 No retry starts after 90 s, counted from the call's first try (`retry_budget`, default 90). The budget does not cut a running try short, so a call can take longer than the budget by one try. `retries`, a `422` retry and a `5xx` retry share one count and one budget in the same call.

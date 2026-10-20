@@ -606,6 +606,10 @@ def test_failure_to_connect_with_original_status_is_still_retried(sleeps: list[f
         ("0", 250),
         (" 7 ", 7000),
         ("99999", 30000),
+        pytest.param("9" * 5000, 30000, id="5000-nines-30000"),
+        ("100", 30000),
+        ("0005", 5000),
+        ("000", 250),
         ("1.5", None),
         ("-1", None),
         ("1e3", None),
@@ -683,6 +687,18 @@ def test_retry_after_is_honoured(
 
     assert response.status_code == 200
     assert sleeps == [waited]
+
+
+def test_retry_after_of_thousands_of_digits_waits_the_cap(
+    server: _Server, sleeps: list[float]
+) -> None:
+    server.script = [(429, {"Retry-After": "9" * 5000}, b""), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET)
+
+    assert response.status_code == 200
+    assert server.calls == 2
+    assert sleeps == [30.0]
 
 
 def test_retry_after_on_a_422_is_honoured(server: _Server, sleeps: list[float]) -> None:
