@@ -787,9 +787,15 @@ class ZenRowsClient:
             return send()
         with _call_scope() as state:
             response = send()
-            # This loop builds the request again from `data`, so it retries
-            # only a method it may send again with a body built the same way.
-            if not (_method_can_be_sent_again(method) and _data_can_be_sent_again(data)):
+            # This loop builds the request again from `data` and `files`, so it
+            # retries only a method it may send again, with a body built the
+            # same way each time. A file passed as `files` is read by the
+            # first try, so it is never retried here.
+            if not (
+                _method_can_be_sent_again(method)
+                and _data_can_be_sent_again(data)
+                and not kwargs.get("files")
+            ):
                 return response
             # Retry a 422 here rather than in urllib3, which can't read the
             # body: Extract's `no_data_extracted` is a final answer, any other

@@ -445,6 +445,28 @@ def test_get_with_a_one_shot_body_is_not_retried(
     assert sleeps == []
 
 
+@pytest.mark.parametrize("status", [422, 503])
+def test_get_with_a_file_in_files_never_sends_an_empty_file_part(
+    server: _Server, sleeps: list[float], status: int
+) -> None:
+    """A 422 retry rebuilds the request from `files`; the first try has read
+    the file, so the retry would send an empty part. It is never sent again.
+    A 503 retry sends the body that `requests` already built, file included."""
+    server.script = [(status, {}, NO_CONTENT), (200, {}, b"ok")]
+
+    response = client(server).fetch(TARGET, files={"f": ("f.txt", io.BytesIO(b"FILEDATA"))})
+
+    if status == 422:
+        assert response.status_code == 422
+        assert len(server.bodies) == 1
+        assert b"FILEDATA" in server.bodies[0]
+        assert sleeps == []
+    else:
+        assert response.status_code == 200
+        assert len(server.bodies) == 2
+        assert all(b"FILEDATA" in body for body in server.bodies)
+
+
 @pytest.mark.parametrize("status", [503, 422])
 @pytest.mark.parametrize(
     ("data", "sent"),
