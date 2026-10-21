@@ -325,7 +325,13 @@ class ZenRowsClient:
         `ready` or `failed`), `state`, `submitted_at`, `updated_at`.
 
         `domain` is the domain without a scheme. `example_urls` are 1 to 5
-        URLs on that domain, one per kind of page you want to extract.
+        URLs on that domain. One URL works, but several related URLs work
+        better: pass at least 3 pages of the same page type when you can,
+        up to 5 (several page types can share the 5, for example 3 product
+        pages and 2 search-result pages). Extract compares the pages of one
+        type against each other, so it can check the fields it found and
+        fill in fields that one page is missing; more pages of a type give
+        more complete, more reliable results for that type.
         Submitting a domain that is already prepared returns its current
         status instead of starting a new run.
 
