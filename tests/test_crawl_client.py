@@ -6,6 +6,9 @@ with open enums, problem+json error mapping, the results scanner's
 stop rule, downloads with their status, retries, and wait.
 """
 
+import base64
+import hashlib
+import hmac
 import json
 
 import pytest
@@ -20,10 +23,13 @@ from zenrows.crawl import (
     ContentStatus,
     CrawlAPIError,
     CrawlErrorCode,
+    CrawlEventType,
     CrawlResult,
     CrawlStatus,
+    CrawlWebhookEvent,
     OutputFormat,
     StopReason,
+    verify_webhook_signature,
 )
 
 BASE_URL = "http://localhost:9100/v1"
@@ -173,6 +179,135 @@ def test_create_sends_markdown_output_format(client: ZenRowsCrawlClient):
         "url": "https://example.com/",
         "output_format": "markdown",
     }
+
+
+@respx.mock
+def test_create_sends_webhook_and_reads_it_back(client: ZenRowsCrawlClient):
+    webhook = {
+        "url": "https://hooks.example.com/zenrows",
+        "events": ["crawl.completed"],
+        "metadata": {"k": "v", "n": 1},
+    }
+    route = respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=Response(202, json=crawl_body(webhook=webhook))
+    )
+
+    crawl = client.create(
+        "https://example.com/",
+        webhook={
+            "url": "https://hooks.example.com/zenrows",
+            "events": ["crawl.completed"],
+            "metadata": {"k": "v", "n": 1},
+        },
+    )
+
+    assert json.loads(route.calls.last.request.content) == {
+        "url": "https://example.com/",
+        "webhook": webhook,
+    }
+    assert crawl.webhook is not None
+    assert crawl.webhook.url == "https://hooks.example.com/zenrows"
+    assert crawl.webhook.events == [CrawlEventType.COMPLETED]
+    assert crawl.webhook.metadata == {"k": "v", "n": 1}
+
+
+@respx.mock
+def test_create_sends_only_the_webhook_url_when_that_is_all_given(client: ZenRowsCrawlClient):
+    route = respx.post(f"{BASE_URL}/crawls").mock(
+        return_value=Response(
+            202,
+            json=crawl_body(
+                webhook={
+                    "url": "https://hooks.example.com/zenrows",
+                    "events": [
+                        "crawl.started",
+                        "crawl.completed",
+                        "crawl.stopped",
+                        "crawl.failed",
+                        "crawl.paused",
+                    ],
+                    "metadata": None,
+                }
+            ),
+        )
+    )
+
+    crawl = client.create(
+        "https://example.com/", webhook={"url": "https://hooks.example.com/zenrows"}
+    )
+
+    assert json.loads(route.calls.last.request.content)["webhook"] == {
+        "url": "https://hooks.example.com/zenrows"
+    }
+    assert crawl.webhook is not None
+    assert crawl.webhook.metadata is None
+    events = crawl.webhook.events
+    assert events[:4] == [
+        CrawlEventType.STARTED,
+        CrawlEventType.COMPLETED,
+        CrawlEventType.STOPPED,
+        CrawlEventType.FAILED,
+    ]
+    assert is_unknown(events[4]) and events[4].value == "crawl.paused"
+
+
+@respx.mock
+def test_crawl_without_webhook_reads_none(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls").mock(
+        return_value=Response(
+            200, json={"crawls": [crawl_body(), crawl_body(crawl_id="c_2", webhook=None)]}
+        )
+    )
+    assert [c.webhook for c in client.list().crawls] == [None, None]
+
+
+@pytest.mark.parametrize("code", ["invalid_webhook", "webhook_signing_key_required"])
+@respx.mock
+def test_webhook_refusals_carry_their_code(client: ZenRowsCrawlClient, code: str):
+    respx.post(f"{BASE_URL}/crawls").mock(return_value=problem(422, code))
+    with pytest.raises(CrawlAPIError) as exc_info:
+        client.create("https://example.com/", webhook={"url": "https://hooks.example.com/z"})
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.code == code
+
+
+def test_webhook_event_verifies_and_parses():
+    secret = base64.b64encode(bytes(range(32))).decode()
+    body = (
+        b'{"schema":"zenrows.webhook/v1","event_id":"ev_01M5AKXYZ_completed",'
+        b'"event_type":"crawl.completed","occurred_at":"2026-10-27T10:42:10Z",'
+        b'"resource":{"type":"crawl","id":"c_01M5AKXYZ",'
+        b'"url":"https://api.zenrows.com/v1/crawls/c_01M5AKXYZ"},"metadata":{"site":"golfclub"}}'
+    )
+    t = 1790000000
+    digest = hmac.new(bytes(range(32)), f"{t}.".encode() + body, hashlib.sha256).hexdigest()
+    header = f"t={t},v1={digest},kid=kid_live"
+
+    assert verify_webhook_signature(body, header, {"kid_live": secret}, now=t)
+    assert not verify_webhook_signature(body + b" ", header, {"kid_live": secret}, now=t)
+
+    event = CrawlWebhookEvent.model_validate_json(body)
+    assert event.schema_ == "zenrows.webhook/v1"
+    assert event.event_id == "ev_01M5AKXYZ_completed"
+    assert event.event_type is CrawlEventType.COMPLETED
+    assert event.resource.type == "crawl"
+    assert event.resource.id == "c_01M5AKXYZ"
+    assert event.metadata == {"site": "golfclub"}
+
+
+def test_webhook_event_without_metadata_or_resource_url():
+    event = CrawlWebhookEvent.model_validate(
+        {
+            "schema": "zenrows.webhook/v1",
+            "event_id": "ev_1_started",
+            "event_type": "crawl.started",
+            "occurred_at": "2026-10-27T10:40:00Z",
+            "resource": {"type": "crawl", "id": "c_1"},
+        }
+    )
+    assert event.event_type is CrawlEventType.STARTED
+    assert event.resource.url is None
+    assert event.metadata is None
 
 
 # ----- get / list / stop -----

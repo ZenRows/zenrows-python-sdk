@@ -83,6 +83,9 @@ and signal checks.
 | 21 | Documented defaults | a create without `max_pages` and `max_items` gets the default the docs state (100) |
 
 Extra checks for this surface: `mypy --strict` sees the package as typed (`py.typed`) and reads the real signatures.
+Check 25 creates a one-page crawl with a `webhook` (`url`, `events` `["crawl.completed"]`,
+`metadata` `{"k": "v"}`), checks that the returned crawl carries it, and stops the crawl. The
+account needs a webhook signing key for it.
 
 ## What it costs
 
