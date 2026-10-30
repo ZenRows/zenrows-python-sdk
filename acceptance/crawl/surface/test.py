@@ -924,6 +924,41 @@ run_check(
     c24,
 )
 
+WEBHOOK = {
+    "url": "https://example.com/zenrows-hook",
+    "events": ["crawl.completed"],
+    "metadata": {"k": "v"},
+}
+
+
+def c25():
+    """webhook: sent at create and carried by the returned crawl."""
+    w = create(depth=1, max_pages=1, webhook=WEBHOOK)
+    client.stop(w.crawl_id)
+    got = (
+        None
+        if w.webhook is None
+        else {
+            "url": w.webhook.url,
+            "events": [e.value for e in w.webhook.events],
+            "metadata": w.webhook.metadata,
+        }
+    )
+    return (
+        pass_if(got == WEBHOOK),
+        f"{w.crawl_id}: webhook {json.dumps(got)}",
+        w.model_dump_json(),
+    )
+
+
+run_check(
+    "25",
+    "Webhook",
+    "create(webhook={url, events, metadata}) returns a crawl whose webhook echoes them",
+    c25,
+    live=True,
+)
+
 with open(f"{RESULTS}/naming.json", "w") as f:
     json.dump(
         {
@@ -942,6 +977,7 @@ with open(f"{RESULTS}/naming.json", "w") as f:
                     "exclude_patterns",
                     "output_format",
                     "discovery",
+                    "webhook",
                     "idempotency_key",
                     "cursor",
                     "limit",

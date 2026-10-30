@@ -37,6 +37,7 @@ from zenrows.crawl.models import (
     CrawlResult,
     CrawlStatus,
     CrawlStop,
+    CrawlWebhookDict,
     CrawlWithResults,
     DownloadLine,
 )
@@ -175,6 +176,7 @@ class ZenRowsCrawlClient:
         exclude_patterns: list[str] | None = None,
         output_format: Literal["html", "markdown"] | None = None,
         discovery: list[Literal["links"]] | None = None,
+        webhook: CrawlWebhookDict | None = None,
         idempotency_key: str | None = None,
     ) -> Crawl:
         """`POST /crawls` — start a crawl and return it, `running`.
@@ -198,6 +200,17 @@ class ZenRowsCrawlClient:
         - `discovery`: how the crawl finds the URLs it follows on each
           page it walks. `["links"]` follows the links in the page's
           HTML, and is what a crawl runs with when you leave it out.
+        - `webhook`: get notified when the crawl starts and how it
+          ends: `{"url": "https://...", "events": [...], "metadata": {...}}`
+          (see `CrawlWebhookDict`). `events` defaults to all four of
+          `crawl.started`, `crawl.completed`, `crawl.stopped` and
+          `crawl.failed`. Each event is POSTed to `url` as JSON
+          (`CrawlWebhookEvent`) and signed with the account's webhook
+          signing key; check it with `verify_webhook_signature`. The
+          returned crawl's `webhook` shows it. Without a signing key on
+          the account, `create` raises 422
+          `webhook_signing_key_required`; a bad `url`, `events` or
+          `metadata` raises 422 `invalid_webhook`.
         - `idempotency_key`: a retry with the same key and body answers
           with the crawl the first request created.
 
@@ -215,6 +228,7 @@ class ZenRowsCrawlClient:
             "exclude_patterns": exclude_patterns,
             "output_format": output_format,
             "discovery": discovery,
+            "webhook": webhook,
         }
         body.update({k: v for k, v in optional.items() if v is not None})
         headers = {"Content-Type": "application/json"}

@@ -43,6 +43,7 @@ This package ships three clients:
 - [Quickstart — Crawl API (new) (`ZenRowsCrawlClient`)](#quickstart--crawl-api-new-zenrowscrawlclient)
   - [Read the pages](#read-the-pages)
   - [List and stop crawls](#list-and-stop-crawls)
+  - [Get notified by webhook](#get-notified-by-webhook)
   - [Crawl errors](#crawl-errors)
 - [Contributing](#contributing)
 - [License](#license)
@@ -725,6 +726,62 @@ for c in page.crawls:
 client.stop(crawl_id)                   # idempotent; read final counts with get()
 ```
 
+### Get notified by webhook
+
+Instead of polling, pass a `webhook` to `create` and the API POSTs an
+event to your URL when the crawl starts and when it ends:
+`crawl.started`, then exactly one of `crawl.completed`, `crawl.stopped`
+or `crawl.failed`. `events` narrows that list (default: all four), and
+`metadata` (up to 20 keys, each value at most 1,024 bytes as JSON) comes
+back in every event so you can match it to your own records. The
+returned crawl shows the webhook as `crawl.webhook`; it is fixed at
+create.
+
+Every event is signed with your account's webhook signing key, so create
+one first in the dashboard (Settings → API Keys); without it `create`
+raises 422 `webhook_signing_key_required`. `verify_webhook_signature`
+checks the `X-Signature` header (`t=...,v1=...,kid=...`): HMAC-SHA256
+over `<t>.<raw body>` with the base64-decoded key, compared in constant
+time, rejecting timestamps more than 5 minutes off.
+
+```python
+from zenrows.crawl import (
+    WEBHOOK_SIGNATURE_HEADER,
+    CrawlWebhookEvent,
+    verify_webhook_signature,
+)
+
+crawl = client.create(
+    start_url,
+    depth=1,
+    webhook={
+        "url": "https://hooks.example.com/zenrows",   # absolute https URL
+        "events": ["crawl.completed", "crawl.stopped", "crawl.failed"],
+        "metadata": {"site": "books"},
+    },
+)
+print(crawl.webhook)
+
+# kid -> your base64 webhook signing key
+SECRETS = {"<kid>": "<secret>"}
+
+
+def receive(raw_body: bytes, headers) -> int:
+    # Verify the raw bytes before parsing them.
+    if not verify_webhook_signature(raw_body, headers[WEBHOOK_SIGNATURE_HEADER], SECRETS):
+        return 401
+    event = CrawlWebhookEvent.model_validate_json(raw_body)
+    print(event.event_type, event.resource.id, event.metadata)
+    return 200
+```
+
+A failed delivery is retried with backoff for up to 3 days, so an event
+can arrive more than once: deduplicate on `event.event_id` (also in the
+`X-ZenRows-Event-Id` header), which is the same on every delivery of one
+event. Events can arrive out of order, so a short crawl's end can come
+before its `crawl.started`: order them by `occurred_at`, or read the
+crawl with `client.get(event.resource.id)`.
+
 ### Crawl errors
 
 Every non-2xx raises `CrawlAPIError`. Branch on `status_code` and `code`:
@@ -754,6 +811,8 @@ except CrawlAPIError as exc:
 | 409 | `idempotency_request_in_flight` | Retry after the first request with this key finishes. |
 | 422 | `invalid_parameter`, `invalid_start_url`, `domain_not_allowed` | Fix the request. Do not retry it as is. |
 | 422 | `idempotency_key_reused` | Use a new key, or no key. Do not retry it as is. |
+| 422 | `invalid_webhook` | The `webhook` `url`, `events` or `metadata` breaks a rule; `detail` names the field. Fix it. |
+| 422 | `webhook_signing_key_required` | Create a webhook signing key in the dashboard, then retry. |
 | 429 | `too_many_crawls` | The account has reached its limit of active jobs (3 by default), shared with its Batch jobs. Retry after `exc.retry_after` seconds. `create` does not retry it. |
 | 503 | `crawl_busy` | `stop` could not be saved yet; the crawl is still running. `stop` retries it up to `retries` times, waiting `exc.retry_after` seconds, then raises it. Repeating the stop is safe. |
 

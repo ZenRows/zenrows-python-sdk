@@ -1,4 +1,5 @@
-"""Pydantic v2 models for the Crawl API's responses.
+"""Pydantic v2 models for the Crawl API's responses, and the
+`CrawlWebhookDict` that `create` takes.
 
 Hand-written: the surface is a handful of small schemas.
 
@@ -8,11 +9,18 @@ server adds later parses as an `UNKNOWN` member that keeps the raw
 value (see `zenrows.batch._open_enum`).
 """
 
+import sys
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:
+    # `typing.NotRequired` only exists on 3.11+; the SDK floors at 3.10.
+    from typing_extensions import NotRequired
 
 from zenrows.batch._open_enum import open_enum_missing
 
@@ -98,6 +106,90 @@ class CrawlErrorCode(Enum):
     _missing_ = classmethod(open_enum_missing)
 
 
+class CrawlEventType(Enum):
+    """A crawl event a webhook can be sent. `crawl.started` once the
+    crawl is created and runs; `crawl.completed`, `crawl.stopped` or
+    `crawl.failed` once it reaches that status, exactly one of them per
+    crawl. Clients must accept values not listed here."""
+
+    STARTED = "crawl.started"
+    COMPLETED = "crawl.completed"
+    STOPPED = "crawl.stopped"
+    FAILED = "crawl.failed"
+
+    _missing_ = classmethod(open_enum_missing)
+
+
+CrawlEventName = Literal["crawl.started", "crawl.completed", "crawl.stopped", "crawl.failed"]
+"""The event names `CrawlWebhookDict.events` takes."""
+
+
+class CrawlWebhookDict(TypedDict):
+    """The `webhook` to pass to `create`: where the crawl's events are
+    sent, and which ones. It is fixed at create; there is no update.
+
+    - `url` (required): the absolute `https` URL each event is POSTed
+      to. Its host must resolve.
+    - `events`: the events to send, each named once. Leave it out for
+      all four (`crawl.started`, `crawl.completed`, `crawl.stopped`,
+      `crawl.failed`).
+    - `metadata`: sent back in every event, to match it to your own
+      records. Up to 20 keys of 1 to 64 characters; each value any
+      JSON value of at most 1,024 bytes as compact JSON.
+
+    Every event is signed with the account's webhook signing key, so
+    the account needs one (Settings → API Keys in the dashboard)."""
+
+    url: str
+    events: NotRequired[list[CrawlEventName]]
+    metadata: NotRequired[dict[str, Any]]
+
+
+class CrawlWebhook(BaseModel):
+    """The webhook a crawl sends its events to, as it runs with it."""
+
+    url: str
+    events: list[CrawlEventType]
+    """The events the crawl sends: all four when the create left
+    `events` out."""
+    metadata: dict[str, Any] | None = None
+    """Sent back in every event. None when the crawl has none."""
+
+
+class CrawlEventResource(BaseModel):
+    """The crawl a webhook event is about."""
+
+    type: str
+    """`crawl`."""
+    id: str
+    """The crawl's `crawl_id`."""
+    url: str | None = None
+    """The crawl on the API. Read it with `get` for its status,
+    coverage and results."""
+
+
+class CrawlWebhookEvent(BaseModel):
+    """The JSON body POSTed to a crawl's webhook for each event.
+
+    Every delivery of one event carries the same `event_id` (also in
+    the `X-ZenRows-Event-Id` header): drop an event you have already
+    handled. Events can arrive out of order; order them by
+    `occurred_at`, or read the crawl. Verify the `X-Signature` header
+    with `verify_webhook_signature` before parsing the body."""
+
+    schema_: str = Field(alias="schema")
+    """`zenrows.webhook/v1`."""
+    event_id: str
+    """Stable across retries, e.g. `ev_01M5AKXYZ_completed`."""
+    event_type: CrawlEventType
+    occurred_at: datetime
+    """When the crawl was created, for `crawl.started`; when it
+    finished, for the others."""
+    resource: CrawlEventResource
+    metadata: dict[str, Any] | None = None
+    """The webhook's `metadata`. None when the crawl has none."""
+
+
 class RunError(BaseModel):
     """Why a crawl failed, or why it stopped because the account ran out
     of credits or the API key hit a credit cap. Present when `status` is
@@ -142,6 +234,9 @@ class Crawl(BaseModel):
     include_patterns: list[str] | None = None
     exclude_patterns: list[str] | None = None
     output_format: OutputFormat | None = None
+    webhook: CrawlWebhook | None = None
+    """Where the crawl sends its events. None for a crawl created
+    without a webhook."""
     duplicates_removed: int | None = None
     """Links met again and dropped as already seen."""
     finished_at: datetime | None = None
@@ -205,10 +300,16 @@ __all__ = [
     "Coverage",
     "Crawl",
     "CrawlErrorCode",
+    "CrawlEventName",
+    "CrawlEventResource",
+    "CrawlEventType",
     "CrawlList",
     "CrawlResult",
     "CrawlStatus",
     "CrawlStop",
+    "CrawlWebhook",
+    "CrawlWebhookDict",
+    "CrawlWebhookEvent",
     "CrawlWithResults",
     "DiscoveryStrategy",
     "DownloadLine",
