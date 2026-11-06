@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.13.0](https://github.com/ZenRows/zenrows-python-sdk/compare/v1.12.0...v1.13.0) (2026-11-06)
+
+
+### Behaviour Changes
+
+* **client:** with retries set, a POST, a PUT, a read timeout, a dropped connection and a target-site status are no longer retried, waits are jittered within a 90 s budget, and a non-int retries value warns ([5024f73](https://github.com/ZenRows/zenrows-python-sdk/commit/5024f7333f513961d987d93b1a4799ebb105eaf7))
+
+
+### Features
+
+* **client:** follow the shared retry policy when retries are turned on; still off by default ([5024f73](https://github.com/ZenRows/zenrows-python-sdk/commit/5024f7333f513961d987d93b1a4799ebb105eaf7))
+
 ## [1.12.0](https://github.com/ZenRows/zenrows-python-sdk/compare/v1.11.0...v1.12.0) (2026-10-30)
 
 
