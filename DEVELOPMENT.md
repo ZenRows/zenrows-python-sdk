@@ -141,7 +141,15 @@ Merge PRs with Conventional Commit titles, for example `fix(crawl): ...` or
 
 After each merge to `main`, release-please opens or updates the PR
 `chore: release X.Y.Z`. It sets the version in `pyproject.toml`,
-`src/zenrows/__version__.py` and `uv.lock`. Do not change these by hand.
+`src/zenrows/__version__.py` and `uv.lock`, and adds the release's entry at
+the top of `CHANGELOG.md`. Do not change these by hand.
+
+To flag a change in behaviour that callers must know about, end the PR body
+with a `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block before you merge.
+Each line in it becomes one changelog entry. A line such as
+`behaviour(client): ...` lands under "Behaviour Changes", at the top of the
+release entry. Next to a `feat` or `fix` line, it does not bump the
+version on its own. A `behaviour` line alone still makes a patch release.
 
 To release, merge that PR. The workflow runs the checks, creates the tag `vX.Y.Z` and the
 GitHub release, and publishes to PyPI.
