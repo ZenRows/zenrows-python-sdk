@@ -13,9 +13,13 @@ For the async (job-based) Batch API, see `zenrows.ZenRowsBatchClient`.
 
 import asyncio
 import math
+import numbers
 import os
+import random
+import sys
 import time
 import warnings
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
@@ -23,19 +27,23 @@ from urllib.parse import quote
 
 import requests
 import urllib3
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from urllib3.exceptions import ConnectTimeoutError
 
 from zenrows.__version__ import __version__
 
 DEFAULT_SCRAPER_URL = "https://api.zenrows.com/v1/"
 DEFAULT_USER_AGENT = f"zenrows/{__version__} python"
 
-# Status codes the urllib3 retry layer treats as transient. 422 is retried
-# too, but in `_worker`, because whether it is worth retrying depends on the
-# response body (see `is_no_data_extracted`).
-_RETRY_STATUSES = [429, 500, 502, 503, 504]
-_RETRY_BACKOFF_FACTOR = 0.5
+# Statuses worth another try. A 422 is retried too, unless its body is
+# Extract's `no_data_extracted` (see `is_no_data_extracted`).
+_RETRY_STATUSES = (429, 500, 502, 503, 504)
+_RETRY_MIN_WAIT = 0.25
+_RETRY_AFTER_CAP = 30.0
+DEFAULT_RETRY_MAX_WAIT = 30.0
+DEFAULT_RETRY_BUDGET = 90.0
+
+# Clock for the retry budget; tests replace it.
+_monotonic = time.monotonic
 
 # Extract's answer when it knows the kind of page but none of the fields came
 # back filled. Retrying returns the same answer, so it is never retried.
@@ -57,6 +65,83 @@ def is_no_data_extracted(response: requests.Response) -> bool:
     charged, and the client does not retry it."""
     code = _error_code(response)
     return response.status_code == 422 and code is not None and code.lower() == _NO_DATA_EXTRACTED
+
+
+def _retry_count(retries: Any) -> int:
+    """`retries` as a count of retries; 0 or less means off. A bool or a
+    non-int number still works as in 1.12.0 (True is 1, 2.5 is 2), with a
+    DeprecationWarning."""
+    if isinstance(retries, int) and not isinstance(retries, bool):
+        return max(retries, 0)
+    if not isinstance(retries, numbers.Real):
+        raise TypeError(f"ZenRowsClient: retries must be an int, got {retries!r}.")
+    count = int(min(retries, sys.maxsize)) if retries > 0 else 0
+    warnings.warn(
+        f"ZenRowsClient: pass retries as an int; {retries!r} is read as {count}.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return count
+
+
+def _seconds(name: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < math.inf:
+        raise ValueError(
+            f"ZenRowsClient: {name} must be a number of seconds above 0, got {value!r}."
+        )
+    return float(value)
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    """The wait a `Retry-After` header asks for, clamped to [0.25, 30] s, or
+    None when it is not whole seconds (an HTTP date, a fraction, a sign)."""
+    value = (value or "").strip()
+    if not (value.isascii() and value.isdigit()):
+        return None
+    # float(), not int(): int() refuses a string of thousands of digits.
+    return min(max(float(value), _RETRY_MIN_WAIT), _RETRY_AFTER_CAP)
+
+
+def _jitter(attempt: int, retry_max_wait: float) -> float:
+    """Full jitter: a random wait between 0.25 s and
+    `min(retry_max_wait, 2 ** attempt)` s, `attempt` counting retries from 0."""
+    ceiling = max(_RETRY_MIN_WAIT, min(retry_max_wait, 2**attempt))
+    return _RETRY_MIN_WAIT + (ceiling - _RETRY_MIN_WAIT) * random.random()
+
+
+def _can_send_again(method: str, data: Any, kwargs: dict) -> bool:
+    """True for a GET whose body `requests` builds the same way on every try.
+    A POST or PUT could run twice (the API does not deduplicate requests),
+    and a file or stream body is used up by the first try."""
+    replayable = data is None or isinstance(data, (str, bytes, Mapping, list, tuple))
+    return method == "GET" and replayable and not kwargs.get("files")
+
+
+def _failed_to_connect(error: requests.ConnectionError) -> bool:
+    """True when the request never reached the server: connection refused,
+    a name that does not resolve, or a connect timeout."""
+    reason = getattr(error.args[0] if error.args else None, "reason", None)
+    reason = getattr(reason, "original_error", reason)  # behind a proxy
+    return isinstance(reason, ConnectTimeoutError)  # NewConnectionError is one too
+
+
+def _from_target(status: int, params: dict) -> bool:
+    """True when `status` may be the target site's own answer, which another
+    try cannot change: any status with `original_status`, or one listed in
+    `allowed_status_codes`."""
+    if str(params.get("original_status", "")).strip().lower() in ("true", "1"):
+        return True
+    allowed = params.get("allowed_status_codes", "")
+    if isinstance(allowed, (list, tuple)):
+        allowed = ",".join(map(str, allowed))
+    return str(status) in (code.strip() for code in str(allowed).split(","))
+
+
+def _is_retryable(response: requests.Response, params: dict) -> bool:
+    status = response.status_code
+    if status not in _RETRY_STATUSES and (status != 422 or is_no_data_extracted(response)):
+        return False
+    return not _from_target(status, params)
 
 
 _FALLBACK_DEPRECATED = (
@@ -182,6 +267,14 @@ class ZenRowsClient:
 
     `base_url` defaults to the public production endpoint; override via
     constructor arg or `ZENROWS_SCRAPER_BASE_URL` env var.
+
+    Retries are off by default (`retries=0`): each request is sent once.
+    With `retries` above 0, a GET is retried on a 429, 500, 502, 503 or 504,
+    a 422 other than `no_data_extracted`, or a failure to connect. Waits
+    honour `Retry-After` in whole seconds (0.25 to 30 s), or else are
+    jittered up to `retry_max_wait`, and no retry starts after
+    `retry_budget` seconds from the first try. See the README for the full
+    rules.
     """
 
     # Kept as a class attribute for compatibility — pre-1.4 callers
@@ -195,25 +288,29 @@ class ZenRowsClient:
         concurrency: int = 5,
         *,
         base_url: str | None = None,
+        retry_max_wait: float = DEFAULT_RETRY_MAX_WAIT,
+        retry_budget: float = DEFAULT_RETRY_BUDGET,
     ):
         if not apikey:
             raise ValueError("ZenRowsClient: apikey is required.")
         self.apikey = apikey
         self.api_url = base_url or os.environ.get("ZENROWS_SCRAPER_BASE_URL") or DEFAULT_SCRAPER_URL
 
-        self.retries = retries
+        self._retries = _retry_count(retries)
+        self.retry_max_wait = _seconds("retry_max_wait", retry_max_wait)
+        self.retry_budget = _seconds("retry_budget", retry_budget)
         self.executor = ThreadPoolExecutor(max_workers=concurrency)
         self.requests_session = requests.Session()
-        if retries > 0:
-            max_retries = Retry(
-                total=retries,
-                backoff_factor=_RETRY_BACKOFF_FACTOR,
-                status_forcelist=_RETRY_STATUSES,
-                raise_on_status=False,
-            )
-            adapter = HTTPAdapter(max_retries=max_retries)
-            self.requests_session.mount("https://", adapter)
-            self.requests_session.mount("http://", adapter)
+
+    @property
+    def retries(self) -> int:
+        """How many times a call may be retried; 0 (the default) is off. Read
+        on every call, so setting it after construction takes effect."""
+        return self._retries
+
+    @retries.setter
+    def retries(self, value: int) -> None:
+        self._retries = _retry_count(value)
 
     # ---- sync HTTP verbs ----
 
@@ -510,7 +607,8 @@ class ZenRowsClient:
             final_headers["Connection"] = None
             final_headers.update(headers)
 
-        response = self.requests_session.request(
+        send = partial(
+            self.requests_session.request,
             method,
             self.api_url,
             params=final_params,
@@ -518,25 +616,31 @@ class ZenRowsClient:
             data=data,
             **kwargs,
         )
-        # Retry a 422 here rather than in urllib3, which can't read the body:
-        # Extract's `no_data_extracted` is a final answer, any other 422 is a
-        # failure to get the target's content and is worth another try.
-        attempt = 0
-        while (
-            response.status_code == 422
-            and attempt < self.retries
-            and not is_no_data_extracted(response)
-        ):
-            attempt += 1
-            # Same schedule as urllib3's Retry: no wait before the first retry.
-            if attempt > 1:
-                time.sleep(_RETRY_BACKOFF_FACTOR * 2 ** (attempt - 1))
-            response = self.requests_session.request(
-                method,
-                self.api_url,
-                params=final_params,
-                headers=final_headers,
-                data=data,
-                **kwargs,
-            )
-        return response
+        if not self.retries or not _can_send_again(method, data, kwargs):
+            return send()
+        started = _monotonic()
+        for attempt in range(self.retries):
+            try:
+                response = send()
+            except requests.ConnectionError as error:
+                if not (_failed_to_connect(error) and self._wait_to_retry(attempt, started, None)):
+                    raise
+            else:
+                retry_after = response.headers.get("Retry-After")
+                if not (
+                    _is_retryable(response, final_params)
+                    and self._wait_to_retry(attempt, started, retry_after)
+                ):
+                    return response
+        return send()
+
+    def _wait_to_retry(self, attempt: int, started: float, retry_after: str | None) -> bool:
+        """Sleep before retry number `attempt` (from 0) and return True, or
+        return False when the wait would end past the retry budget."""
+        delay = _retry_after_seconds(retry_after)
+        if delay is None:
+            delay = _jitter(attempt, self.retry_max_wait)
+        if _monotonic() - started + delay > self.retry_budget:
+            return False
+        time.sleep(delay)
+        return True

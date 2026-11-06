@@ -31,6 +31,7 @@ This package ships three clients:
   - [Concurrency](#concurrency)
   - [Extract](#extract)
     - [Preparing a domain](#preparing-a-domain)
+  - [Retries](#retries)
 - [Quickstart — Batch API (`ZenRowsBatchClient`)](#quickstart--batch-api-zenrowsbatchclient)
   - [Extract in a batch](#extract-in-a-batch)
   - [Upload URLs from a CSV](#upload-urls-from-a-csv)
@@ -59,7 +60,7 @@ Start using the API by [creating your API Key](https://www.zenrows.com/register?
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
-It also uses [Retry](https://urllib3.readthedocs.io/en/latest/reference/urllib3.util.html) to automatically retry failed requests (status codes 422, 429, 500, 502, 503, and 504, except Extract's `422 no_data_extracted`). Retries are not active by default; you need to specify the number of retries, as shown below. It already includes an exponential back-off retry delay between failed requests.
+Retries are off by default: the client sends each request once. Pass `retries` to retry a failed GET, as shown below. See [Retries](#retries) for what is retried and how long the client waits.
 
 `client.fetch()` is the primary method for the main page-scraping product; `client.get()` still works and is kept as a deprecated alias.
 
@@ -132,7 +133,7 @@ The SDK also offers POST requests by calling the `client.post` method. It can re
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY", retries=1)
+client = ZenRowsClient("YOUR-API-KEY")
 url = "https://httpbin.org/anything"
 
 response = client.post(url, data={
@@ -150,7 +151,7 @@ The SDK also offers PUT requests by calling the `client.put` method. It can rece
 ```python
 from zenrows import ZenRowsClient
 
-client = ZenRowsClient("YOUR-API-KEY", retries=1)
+client = ZenRowsClient("YOUR-API-KEY")
 url = "https://httpbin.org/anything"
 
 response = client.put(url, data={
@@ -270,6 +271,41 @@ print(status["status"])  # "ready" or "failed" (see status["failure"])
 Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints) for every status and failure code.
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
+
+### Retries
+
+Retries are off by default (`retries=0`): the client sends each request once. Pass `retries` to turn them on:
+
+```python
+from zenrows import ZenRowsClient
+
+client = ZenRowsClient("YOUR-API-KEY", retries=3, retry_max_wait=10, retry_budget=60)
+```
+
+With `retries` set, the client retries a GET, up to `retries` times, after:
+
+1. A `429`, `500`, `502`, `503` or `504`, or a `422` other than Extract's `no_data_extracted`.
+2. A failure to connect: connection refused, a name that does not resolve, or a connect timeout. The request never reached the server.
+
+It never retries:
+
+1. A POST or PUT. The API does not deduplicate requests, so a second try could run twice. Write your own retry if you need one.
+2. A request with `files`, or whose `data` is a file, a generator or another stream: the first try uses it up.
+3. A read timeout (it raises `requests.ReadTimeout`), a connection closed after the request was sent, a TLS error, or any other status. The server may still be working on that request.
+4. A status from the target site: any status when `params` sets `original_status`, and a status listed in `allowed_status_codes`.
+5. `prepare_domain()` and `prepared_domain_status()`: their `429` and `503` are answers to read.
+
+Between tries, the client waits the `Retry-After` header when it is whole seconds (at least 0.25 s, at most 30 s). Otherwise it waits a random time between 0.25 s and `min(retry_max_wait, 2 ** attempt)` seconds, where `attempt` counts retries from 0 and `retry_max_wait` defaults to 30. No retry starts after `retry_budget` seconds (default 90) from the call's first try; a running try is not cut short. A wait runs to its end, also in the `_async` methods. `retry_max_wait` and `retry_budget` must be numbers above 0, or the client raises `ValueError`. Setting `client.retries` later applies from the next call.
+
+**If you already set `retries`.** Up to 1.12.0 the client retried more. Now:
+
+1. A PUT is no longer retried on a `429` or `5xx`, and a POST or PUT is no longer retried on a `422` or a failure to connect.
+2. A read timeout, a dropped connection, a TLS error and a `413` with `Retry-After` are no longer retried. A read timeout raises `requests.ReadTimeout` instead of `requests.ConnectionError`.
+3. A status from the target site, a request with `files` and a stream body are sent once.
+4. `Retry-After` counts only as whole seconds, capped at 30 s: an HTTP date is ignored, and `1.5` no longer raises `InvalidHeader`. The `422` retry now honours it too.
+5. Waits are jittered instead of 0, 1, 2, 4... seconds, within the 90 s budget, and a call sends at most `retries + 1` requests: a `422` retry no longer adds to the `5xx` retries.
+6. A `bool` or non-integer `retries` still works with a `DeprecationWarning`: `True` is 1, `2.5` is 2, 0 or less is off.
+7. Setting `client.retries` after creating the client now applies to every retry, not only the `422` retry.
 
 ## Quickstart — Batch API (`ZenRowsBatchClient`)
 
