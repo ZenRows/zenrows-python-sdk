@@ -44,7 +44,7 @@ DEFAULT_RETRY_MAX_WAIT = 30.0
 DEFAULT_RETRY_BUDGET = 90.0
 
 # The API key as it appears in a request URL.
-_APIKEY_IN_URL = re.compile(r"apikey=[^&\s]*")
+_APIKEY_IN_URL = re.compile(r"(?<=[?&])apikey=[^&\s]*")
 
 # Clock for the retry budget; tests replace it.
 _monotonic = time.monotonic
@@ -131,25 +131,19 @@ def _failed_to_connect(error: requests.ConnectionError) -> bool:
 
 def _redact_apikey(error: BaseException) -> None:
     """Replace the API key with REDACTED in the messages of `error` and of the
-    exceptions it wraps. A failed connection names the request URL, which
-    carries the key in `apikey`, so logging the error would log the key. The
-    exceptions stay the same objects."""
-    seen: set[int] = set()
-    pending = [error]
-    while pending:
-        exc = pending.pop()
-        if id(exc) in seen:
-            continue
-        seen.add(id(exc))
-        exc.args = tuple(
-            _APIKEY_IN_URL.sub("apikey=REDACTED", arg) if isinstance(arg, str) else arg
-            for arg in exc.args
-        )
-        pending += [
-            inner
-            for inner in (*exc.args, exc.__cause__, exc.__context__)
-            if isinstance(inner, BaseException)
-        ]
+    exceptions it wraps (its `args`). A failed connection names the request
+    URL, which carries the key in `apikey`, so logging the error would log the
+    key. The exceptions stay the same objects, and an exception the caller was
+    handling when it made the request is left alone."""
+    for arg in error.args:
+        if isinstance(arg, BaseException):
+            _redact_apikey(arg)
+    args = tuple(
+        _APIKEY_IN_URL.sub("apikey=REDACTED", arg) if isinstance(arg, str) else arg
+        for arg in error.args
+    )
+    if args != error.args:
+        error.args = args
 
 
 def _from_target(status: int, params: dict) -> bool:

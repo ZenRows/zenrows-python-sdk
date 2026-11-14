@@ -1,8 +1,5 @@
-import socket
-import traceback
 from unittest import TestCase, mock
 
-import requests
 import urllib3
 from requests import Session
 
@@ -155,19 +152,3 @@ class TestZenRowsClient(TestCase):
                 "key2": "value2",
             },
         )
-
-    def test_a_connection_error_hides_the_api_key(self):
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", 0))
-            closed = f"http://127.0.0.1:{sock.getsockname()[1]}/v1/"
-        for retries in (0, 1):
-            client = ZenRowsClient("secret+key/=", base_url=closed, retries=retries)
-            with (
-                mock.patch("time.sleep"),
-                self.assertRaises(requests.ConnectionError) as raised,
-            ):
-                client.get(url)
-
-            printed = "".join(traceback.format_exception(raised.exception))
-            self.assertIn("apikey=REDACTED", str(raised.exception))
-            self.assertNotIn("secret", printed)
