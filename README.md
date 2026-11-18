@@ -7,7 +7,7 @@
 
 # Zenrows Python SDK
 
-SDK to access [Zenrows](https://www.zenrows.com/) APIs directly from Python.
+SDK to access [Zenrows](https://www.zenrows.com/?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) APIs directly from Python.
 Zenrows handles proxies rotation, headless browsers, and CAPTCHAs for you.
 
 This package ships three clients:
@@ -56,7 +56,7 @@ pip install zenrows
 ```
 
 ## Quickstart — synchronous scraping (`ZenRowsClient`)
-Start using the API by [creating your API Key](https://www.zenrows.com/register?p=free).
+Start using the API by [creating your API Key](https://www.zenrows.com/register?p=free&utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk).
 
 The SDK uses [requests](https://docs.python-requests.org/) for HTTP requests. The client's response will be a requests `Response`.
 
@@ -112,7 +112,7 @@ response = client.fetch(url, params={
 print(response.text)
 ```
 
-You can also pass optional `params` and `headers`; the list above is a reference. For more info, check out [the documentation page](https://www.zenrows.com/documentation).
+You can also pass optional `params` and `headers`; the list above is a reference. For more info, check out [the documentation page](https://www.zenrows.com/documentation?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk).
 
 Sending headers to the target URL will overwrite our defaults. Be careful when doing it and contact us if there is any problem.
 
@@ -164,7 +164,7 @@ print(response.text)
 
 ### Concurrency
 
-To limit the concurrency, it uses [asyncio](https://docs.python.org/3/library/asyncio.html), which will simultaneously send a maximum of requests. The concurrency is determined by the plan you are in, so take a look at the [pricing](https://www.zenrows.com/pricing) and set it accordingly. Take into account that each client instance will have its own limit, meaning that two different scripts will not share it, and 429 (Too Many Requests) errors might arise.
+To limit the concurrency, it uses [asyncio](https://docs.python.org/3/library/asyncio.html), which will simultaneously send a maximum of requests. The concurrency is determined by the plan you are in, so take a look at the [pricing](https://www.zenrows.com/pricing?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) and set it accordingly. Take into account that each client instance will have its own limit, meaning that two different scripts will not share it, and 429 (Too Many Requests) errors might arise.
 
 The main difference with the sequential snippet above is `client.fetch_async` instead of `client.fetch`. The rest will work exactly the same. But the async is necessary to parallelize calls and allow async/await syntax. Remember to run the scripts with `asyncio.run` or it will fail with a `coroutine 'main' was never awaited` error.
 
@@ -191,7 +191,7 @@ asyncio.run(main())
 
 ### Extract
 
-[Extract](https://docs.zenrows.com/extract/introduction) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()`: it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
+[Extract](https://docs.zenrows.com/extract/introduction?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) runs a page through Zenrows' AI-powered structured extraction instead of returning raw HTML. Use `client.extract()`: it's the same request as `fetch()`, with the `extract` param set for you (defaults to `"auto"`; pass `"native"` or `"standard"` for the other contracts).
 
 ```python
 from zenrows import ZenRowsClient
@@ -205,7 +205,7 @@ response = client.extract(url)  # extract: "auto"
 print(response.json())
 ```
 
-`extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
+`extract()` also sends [Adaptive Stealth Mode](https://docs.zenrows.com/fetch/features/adaptive-stealth-mode?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) (`mode: "auto"`) by default, except when `params` sets `js_render` or `premium_proxy`: the API rejects either combined with Adaptive Stealth Mode, so your fixed configuration is sent as is. Pass `adaptive_stealth=False` to turn it off entirely.
 
 Extract works on any prepared domain (you can prepare one yourself with `POST /v1/extract/prepared-domains`). A `403` with `code: "REQS007"` means Extract can't extract this page. Check `reason` in the problem body when present; older responses may not carry it:
 
@@ -268,9 +268,9 @@ print(status["status"])  # "ready" or "failed" (see status["failure"])
 
 `prepare_domain_async()` and `prepared_domain_status_async()` are the async counterparts. The client's `retries` setting doesn't apply to these calls, and an empty `domain` raises `ValueError` before any request.
 
-Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints) for every status and failure code.
+Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) for every status and failure code.
 
-A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup).
+A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk).
 
 ### Retries
 
