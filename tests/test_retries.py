@@ -11,6 +11,7 @@ import math
 import socket
 import sys
 import threading
+import traceback
 import warnings
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -317,6 +318,23 @@ def test_failure_to_connect_is_retried_for_a_get_only(
         getattr(zr, verb)(TARGET, params=params)
 
     assert len(sleeps) == retried
+
+
+@pytest.mark.parametrize("retries", [0, 2])
+def test_failure_to_connect_hides_the_api_key(sleeps: list[float], retries: int):
+    zr = ZenRowsClient("secret+key/=", base_url=closed_port_url(), retries=retries)
+    handled = ValueError("?apikey=not-ours")
+
+    with pytest.raises(requests.ConnectionError) as raised:
+        try:
+            raise handled
+        except ValueError:
+            zr.get(TARGET)
+
+    assert "apikey=REDACTED" in str(raised.value)
+    assert "secret" not in "".join(traceback.format_exception(raised.value))
+    # The exception the caller was handling is not the client's to change.
+    assert str(handled) == "?apikey=not-ours"
 
 
 # ---- which requests are sent again ----
