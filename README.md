@@ -255,7 +255,7 @@ try:
         ],
     )
 except PreparedDomainError as err:
-    # e.g. 409 in_progress, 429 out_of_allowance, 503 overloaded
+    # e.g. 409 in_progress, 429 out_of_allowance or domain_rejection_limit, 503 overloaded
     print(err.status_code, err.code, err.detail)
     raise
 
@@ -268,7 +268,9 @@ print(status["status"])  # "ready" or "failed" (see status["failure"])
 
 `prepare_domain_async()` and `prepared_domain_status_async()` are the async counterparts. The client's `retries` setting doesn't apply to these calls, and an empty `domain` raises `ValueError` before any request.
 
-Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) for every status and failure code.
+Both methods raise `PreparedDomainError` on an error answer, with `status_code`, `code` (`invalid_argument`, `not_found`, `in_progress`, `out_of_allowance`, `domain_rejection_limit`, `overloaded`, `disabled`, ...), `detail`, `reason` and the whole `problem` body.
+
+Two `429` codes mean different things. `out_of_allowance` means the account has no preparations left this month. `domain_rejection_limit` means this domain's preparations failed verification as many times as the monthly limit allows: don't submit this domain again this month, though other domains can still be prepared, and the refused submission cost nothing. Its `problem` also carries `domain`, `rejected`, `limit` and `month`. See the [Extract endpoints docs](https://docs.zenrows.com/extract/endpoints?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk) for every status and failure code.
 
 A `422` with `code: "no_data_extracted"` means Extract knows this kind of page but found no data on it. It isn't charged, and the client never retries it, even with `retries` set. `is_no_data_extracted(response)` tells you when you got one. See the [Extract docs](https://docs.zenrows.com/extract/setup?utm_source=github&utm_medium=readme&utm_campaign=zenrows-python-sdk).
 
