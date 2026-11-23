@@ -161,7 +161,7 @@ def _check_domain(domain: str) -> None:
 def _prepared_domains_request(method: str, url: str, **kwargs: Any) -> requests.Response:
     # Not through `requests_session`: its retry adapter would retry a 429 or
     # 503, which these endpoints use for answers to read (out_of_allowance,
-    # overloaded). The Go and Node SDKs skip client retries here too.
+    # domain_rejection_limit, overloaded). The Go and Node SDKs skip client retries here too.
     with requests.Session() as session:
         return session.request(method, url, **kwargs)
 
@@ -186,9 +186,13 @@ class PreparedDomainError(Exception):
     `code` is the problem's `code` member, for example `invalid_argument`
     (400), `not_found` (404), `in_progress` (409: a preparation is already
     running, read its status instead of resubmitting), `out_of_allowance`
-    (429: no preparations left this month), or `overloaded` / `disabled`
-    (503); None when the body has no code. `problem` holds the whole body,
-    or None when it was not JSON.
+    (429: no preparations left this month), `domain_rejection_limit` (429:
+    this domain's preparations were rejected as many times as this month
+    allows; don't retry it this month, other domains still work), or
+    `overloaded` / `disabled` (503); None when the body has no code.
+    `problem` holds the whole body, or None when it was not JSON; a
+    `domain_rejection_limit` body also carries `domain`, `rejected`,
+    `limit` and `month`.
     """
 
     def __init__(
@@ -439,7 +443,7 @@ class ZenRowsClient:
         Raises `ValueError` for an empty `domain`, before any request, and
         `PreparedDomainError` on a non-2xx answer, for example 400
         `invalid_argument`, 409 `in_progress`, 429 `out_of_allowance` or
-        503 `overloaded` / `disabled`.
+        `domain_rejection_limit`, or 503 `overloaded` / `disabled`.
         """
         _check_domain(domain)
         response = _prepared_domains_request(

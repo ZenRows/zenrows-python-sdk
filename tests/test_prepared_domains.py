@@ -241,6 +241,40 @@ class TestPreparedDomainsIgnoreRetries(TestCase):
         self.assertEqual(caught.exception.code, "out_of_allowance")
         self.assertEqual(len(self.api.requests), 1)
 
+    def test_prepare_429_domain_rejection_limit_is_not_retried(self):
+        detail = (
+            "www.example.com had 3 rejected preparation attempts this month (failed "
+            "verification); the limit is 3 per domain per month. This submission was not "
+            "accepted and not counted against your allowance. New attempts for this domain "
+            "reopen at the start of next month (UTC)."
+        )
+        problem = {
+            "type": "https://docs.zenrows.com/api-error-codes#domain_rejection_limit",
+            "title": "Domain rejection limit reached",
+            "status": 429,
+            "code": "domain_rejection_limit",
+            "detail": detail,
+            "domain": "www.example.com",
+            "rejected": 3,
+            "limit": 3,
+            "month": "2026-11",
+        }
+        self.api.reply(429, problem)
+        self.api.reply(202, PREPARING)
+
+        with self.assertRaises(PreparedDomainError) as caught:
+            self.client.prepare_domain("www.example.com", ["https://www.example.com/"])
+
+        err = caught.exception
+        self.assertEqual(err.status_code, 429)
+        self.assertEqual(err.code, "domain_rejection_limit")
+        self.assertEqual(err.detail, detail)
+        self.assertEqual(err.problem["domain"], "www.example.com")
+        self.assertEqual(err.problem["rejected"], 3)
+        self.assertEqual(err.problem["limit"], 3)
+        self.assertEqual(err.problem["month"], "2026-11")
+        self.assertEqual(len(self.api.requests), 1)
+
     def test_scraping_keeps_its_retries(self):
         """Control: the same client still retries a 503 on a scraping request."""
         self.api.reply(503, b"busy")
