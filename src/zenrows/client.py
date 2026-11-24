@@ -16,6 +16,7 @@ import math
 import numbers
 import os
 import random
+import re
 import sys
 import time
 import warnings
@@ -41,6 +42,9 @@ _RETRY_MIN_WAIT = 0.25
 _RETRY_AFTER_CAP = 30.0
 DEFAULT_RETRY_MAX_WAIT = 30.0
 DEFAULT_RETRY_BUDGET = 90.0
+
+# The API key as it appears in a request URL.
+_APIKEY_IN_URL = re.compile(r"(?<=[?&])apikey=[^&\s]*")
 
 # Clock for the retry budget; tests replace it.
 _monotonic = time.monotonic
@@ -123,6 +127,23 @@ def _failed_to_connect(error: requests.ConnectionError) -> bool:
     reason = getattr(error.args[0] if error.args else None, "reason", None)
     reason = getattr(reason, "original_error", reason)  # behind a proxy
     return isinstance(reason, ConnectTimeoutError)  # NewConnectionError is one too
+
+
+def _redact_apikey(error: BaseException) -> None:
+    """Replace the API key with REDACTED in the messages of `error` and of the
+    exceptions it wraps (its `args`). A failed connection names the request
+    URL, which carries the key in `apikey`, so logging the error would log the
+    key. The exceptions stay the same objects, and an exception the caller was
+    handling when it made the request is left alone."""
+    for arg in error.args:
+        if isinstance(arg, BaseException):
+            _redact_apikey(arg)
+    args = tuple(
+        _APIKEY_IN_URL.sub("apikey=REDACTED", arg) if isinstance(arg, str) else arg
+        for arg in error.args
+    )
+    if args != error.args:
+        error.args = args
 
 
 def _from_target(status: int, params: dict) -> bool:
@@ -611,7 +632,7 @@ class ZenRowsClient:
             final_headers["Connection"] = None
             final_headers.update(headers)
 
-        send = partial(
+        request = partial(
             self.requests_session.request,
             method,
             self.api_url,
@@ -620,6 +641,14 @@ class ZenRowsClient:
             data=data,
             **kwargs,
         )
+
+        def send() -> requests.Response:
+            try:
+                return request()
+            except requests.RequestException as error:
+                _redact_apikey(error)
+                raise
+
         if not self.retries or not _can_send_again(method, data, kwargs):
             return send()
         started = _monotonic()
